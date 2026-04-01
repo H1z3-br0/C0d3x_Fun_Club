@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat <<'EOF'
+CTF container helpers:
+  ctf-install apt <package...>      install extra Debian packages via temporary installer container
+  ctf-install pip <package...>      install extra Python packages into shared tool-cache
+  ctf-install gem <gem...>          install Ruby gems into shared tool-cache
+  ctf-install cargo <crate...>      install Rust crates into shared tool-cache
+  ctf-install go <module@version>   install Go tools into shared tool-cache
+  ctf-install npm <package...>      install Node tools into shared tool-cache
+
+Important writable paths:
+  /workspace/artifacts
+  /workspace/tool-cache
+  /workspace/tool-cache/bin
+
+Read-only input path:
+  /workspace/task
+EOF
+
+printf 'Current profile: %s\n' "${CTF_PROFILE:-unknown}"
+printf 'Shared tool-cache: %s\n' "${CTF_TOOL_CACHE:-/workspace/tool-cache}"
+printf '\nPreinstalled highlights:\n'
+for tool in \
+  python pip git curl wget jq file xxd whois \
+  gdb gdb-multiarch strace radare2 r2 patchelf \
+  binwalk foremost yara steghide sqlmap hydra nmap socat tcpdump tshark \
+  ffuf gobuster dirb wfuzz smbclient redis-cli psql mysql telnet ftp \
+  ffmpeg tesseract qpdf exiftool tmux ruby gem cargo go npm dotnet jadx apktool adb \
+  sudo ssh sshpass getcap capsh getfacl getfattr nsenter unshare; do
+  if command -v "${tool}" >/dev/null 2>&1; then
+    printf '  - %s -> %s\n' "${tool}" "$(command -v "${tool}")"
+  fi
+done

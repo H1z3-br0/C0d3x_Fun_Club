@@ -1,0 +1,31 @@
+host: "127.0.0.1"
+port: 8312
+
+auth-dir: "./deploy/cliproxy/support-claude/auth"
+
+api-keys:
+  - "orchestrator-support-claude-key"
+
+remote-management:
+  allow-remote: false
+  secret-key: "support-claude-management-key"
+  disable-control-panel: true
+
+debug: false
+logging-to-file: true
+usage-statistics-enabled: true
+request-retry: 3
+max-retry-interval: 30
+
+routing:
+  strategy: "round-robin"
+
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 1
+
+oauth-model-alias:
+  claude:
+    - name: "claude-sonnet-4-5-20250929"
+      alias: "claude-code"
+      fork: true

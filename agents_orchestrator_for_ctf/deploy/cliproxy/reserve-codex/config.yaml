@@ -1,0 +1,32 @@
+host: "127.0.0.1"
+port: 8313
+
+auth-dir: "./deploy/cliproxy/reserve-codex/auth"
+
+api-keys:
+  - "orchestrator-reserve-codex-key"
+
+remote-management:
+  allow-remote: false
+  secret-key: "reserve-codex-management-key"
+  disable-control-panel: true
+
+debug: false
+logging-to-file: true
+usage-statistics-enabled: true
+request-retry: 3
+max-retry-interval: 30
+codex-instructions-enabled: true
+
+routing:
+  strategy: "round-robin"
+
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 1
+
+oauth-model-alias:
+  codex:
+    - name: "gpt-5-codex"
+      alias: "codex"
+      fork: true

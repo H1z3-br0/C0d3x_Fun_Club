@@ -1,0 +1,82 @@
+cliproxyapi:
+  base_url: "http://127.0.0.1:8311/v1"
+  api_key: "orchestrator-master-claude-key"
+  timeout_seconds: 180
+
+accounts:
+  cc_master:
+    model: "claude-code"
+    base_url: "http://127.0.0.1:8311/v1"
+    api_key: "orchestrator-master-claude-key"
+    emails:
+      - "REPLACE_WITH_CC1_EMAIL"
+
+  cc_support:
+    model: "claude-code"
+    base_url: "http://127.0.0.1:8312/v1"
+    api_key: "orchestrator-support-claude-key"
+    emails:
+      - "REPLACE_WITH_CC2_EMAIL"
+
+  smart_reserve:
+    model: "codex"
+    base_url: "http://127.0.0.1:8313/v1"
+    api_key: "orchestrator-reserve-codex-key"
+    emails:
+      - "REPLACE_WITH_RESERVE01_EMAIL"
+      - "REPLACE_WITH_RESERVE02_EMAIL"
+      - "REPLACE_WITH_RESERVE03_EMAIL"
+      - "REPLACE_WITH_RESERVE04_EMAIL"
+
+  executors:
+    model: "codex"
+    base_url: "http://127.0.0.1:8314/v1"
+    api_key: "orchestrator-executors-codex-key"
+    emails:
+      - "REPLACE_WITH_WORKER01_EMAIL"
+      - "REPLACE_WITH_WORKER02_EMAIL"
+      - "REPLACE_WITH_WORKER03_EMAIL"
+      - "REPLACE_WITH_WORKER04_EMAIL"
+      - "REPLACE_WITH_WORKER05_EMAIL"
+      - "REPLACE_WITH_WORKER06_EMAIL"
+      - "REPLACE_WITH_WORKER07_EMAIL"
+      - "REPLACE_WITH_WORKER08_EMAIL"
+      - "REPLACE_WITH_WORKER09_EMAIL"
+      - "REPLACE_WITH_WORKER10_EMAIL"
+      - "REPLACE_WITH_WORKER11_EMAIL"
+      - "REPLACE_WITH_WORKER12_EMAIL"
+      - "REPLACE_WITH_WORKER13_EMAIL"
+      - "REPLACE_WITH_WORKER14_EMAIL"
+      - "REPLACE_WITH_WORKER15_EMAIL"
+      - "REPLACE_WITH_WORKER16_EMAIL"
+      - "REPLACE_WITH_WORKER17_EMAIL"
+      - "REPLACE_WITH_WORKER18_EMAIL"
+      - "REPLACE_WITH_WORKER19_EMAIL"
+      - "REPLACE_WITH_WORKER20_EMAIL"
+
+limits:
+  worker_max_steps: 15
+  worker_timeout_seconds: 300
+  max_parallel_workers: 15
+  planner_parallelism: 4
+  cc_usage_warning_pct: 0.80
+  rate_limit_backoff_seconds: 65
+  llm_max_retries: 2
+  cc_token_soft_limit: 600000
+  cc_request_soft_limit: 50
+  cc_step_soft_limit: 120
+  state_checkpoint_interval_seconds: 2.0
+  event_log_max_entries: 1000
+  ctfd_refresh_interval_seconds: 90
+
+sandbox:
+  enabled: true
+  network_disabled: true
+  docker_image: "ctf-swarm:base"
+  auto_build_image: false
+
+ctf:
+  flag_format: "CTF{...}"
+
+paths:
+  workspace_root: "workspace"
