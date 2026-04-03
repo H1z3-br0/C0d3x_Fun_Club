@@ -12,6 +12,7 @@ logs/
 
 # Challenge data (downloaded at runtime)
 challenges*/
+tasks/
 
 # Python
 __pycache__/
@@ -33,4 +34,4 @@ findings/
 # Runtime
 workspace/
 codex-schema-*/
-.claude/scheduled_tasks.lock
+.claude/
