@@ -27,6 +27,9 @@ uv.lock
 # Knowledge base (cloned via scripts/fetch-knowledge.sh)
 knowledge/
 
+# Findings (generated at runtime)
+findings/
+
 # Runtime
 workspace/
 codex-schema-*/
