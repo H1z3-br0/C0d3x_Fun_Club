@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARTIFACTS_DIR="${CTF_ARTIFACTS:-/workspace/artifacts}"
+TOOL_CACHE_DIR="${CTF_TOOL_CACHE:-/workspace/tool-cache}"
+BIN_DIR="${CTF_BIN_DIR:-/workspace/tool-cache/bin}"
+PYTHON_PREFIX_DIR="${CTF_PYTHON_PREFIX:-/workspace/tool-cache/python}"
+CARGO_ROOT="${CTF_CARGO_ROOT:-/workspace/tool-cache/.cargo-root}"
+CARGO_HOME_DIR="${CTF_CARGO_HOME:-/workspace/tool-cache/.cargo-home}"
+GO_BIN_DIR="${CTF_GO_BIN:-/workspace/tool-cache/bin}"
+GEM_HOME_DIR="${CTF_GEM_HOME:-/workspace/tool-cache/.gem}"
+NPM_PREFIX_DIR="${CTF_NPM_PREFIX:-/workspace/tool-cache/.npm-global}"
+STAMP_DIR="${TOOL_CACHE_DIR}/.install-stamps"
+LOG_FILE="${ARTIFACTS_DIR}/tool-installs.log"
+
+mkdir -p \
+  "${ARTIFACTS_DIR}" \
+  "${TOOL_CACHE_DIR}" \
+  "${BIN_DIR}" \
+  "${PYTHON_PREFIX_DIR}" \
+  "${CARGO_ROOT}" \
+  "${CARGO_HOME_DIR}" \
+  "${GO_BIN_DIR}" \
+  "${GEM_HOME_DIR}" \
+  "${NPM_PREFIX_DIR}" \
+  "${STAMP_DIR}"
+touch "${LOG_FILE}"
+
+log() {
+  echo "[$(date -Iseconds)] $*" | tee -a "${LOG_FILE}" >&2
+}
+
+ensure_manager() {
+  case "${subcommand}" in
+    cargo)
+      if ! command -v cargo >/dev/null 2>&1; then
+        log "bootstrapping cargo"
+        apt-get update
+        apt-get install -y --no-install-recommends cargo
+      fi
+      ;;
+    go)
+      if ! command -v go >/dev/null 2>&1; then
+        log "bootstrapping golang-go"
+        apt-get update
+        apt-get install -y --no-install-recommends golang-go
+      fi
+      ;;
+    npm)
+      if ! command -v npm >/dev/null 2>&1; then
+        log "bootstrapping nodejs/npm"
+        apt-get update
+        apt-get install -y --no-install-recommends nodejs npm
+      fi
+      ;;
+    gem)
+      if ! command -v gem >/dev/null 2>&1; then
+        log "bootstrapping ruby-full"
+        apt-get update
+        apt-get install -y --no-install-recommends ruby-full
+      fi
+      ;;
+    *)
+      ;;
+  esac
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ctf-install apt <package...>
+  ctf-install pip <package...>
+  ctf-install gem <gem...>
+  ctf-install cargo <crate...>
+  ctf-install go <module@version...>
+  ctf-install npm <package...>
+  ctf-install list
+EOF
+}
+
+if [ "$#" -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+subcommand="$1"
+shift
+
+stamp_file() {
+  local key
+  key="$(printf '%s\0' "${subcommand}" "$@" | sha256sum | awk '{print $1}')"
+  printf '%s/%s-%s.stamp\n' "${STAMP_DIR}" "${subcommand}" "${key}"
+}
+
+case "${subcommand}" in
+  apt)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    log "apt install $*"
+    apt-get update
+    apt-get install -y --no-install-recommends "$@"
+    ;;
+  pip)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    stamp="$(stamp_file "$@")"
+    if [ -f "${stamp}" ]; then
+      log "pip cache hit $*"
+      exit 0
+    fi
+    log "pip install $*"
+    python -m pip install --no-cache-dir --break-system-packages --prefix "${PYTHON_PREFIX_DIR}" "$@"
+    touch "${stamp}"
+    ;;
+  gem)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    stamp="$(stamp_file "$@")"
+    if [ -f "${stamp}" ]; then
+      log "gem cache hit $*"
+      exit 0
+    fi
+    ensure_manager
+    log "gem install $*"
+    GEM_HOME="${GEM_HOME_DIR}" GEM_PATH="${GEM_HOME_DIR}" gem install --no-document --bindir "${BIN_DIR}" "$@"
+    touch "${stamp}"
+    ;;
+  cargo)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    stamp="$(stamp_file "$@")"
+    if [ -f "${stamp}" ]; then
+      log "cargo cache hit $*"
+      exit 0
+    fi
+    ensure_manager
+    log "cargo install $*"
+    CARGO_HOME="${CARGO_HOME_DIR}" cargo install --root "${CARGO_ROOT}" "$@"
+    touch "${stamp}"
+    ;;
+  go)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    stamp="$(stamp_file "$@")"
+    if [ -f "${stamp}" ]; then
+      log "go cache hit $*"
+      exit 0
+    fi
+    ensure_manager
+    log "go install $*"
+    export GOBIN="${GO_BIN_DIR}"
+    export GOCACHE="${ARTIFACTS_DIR}/.go-build-cache"
+    export GOMODCACHE="${ARTIFACTS_DIR}/.go-mod-cache"
+    mkdir -p "${GOBIN}" "${GOCACHE}" "${GOMODCACHE}"
+    for module in "$@"; do
+      go install "${module}"
+    done
+    touch "${stamp}"
+    ;;
+  npm)
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    stamp="$(stamp_file "$@")"
+    if [ -f "${stamp}" ]; then
+      log "npm cache hit $*"
+      exit 0
+    fi
+    ensure_manager
+    log "npm install $*"
+    npm install -g --prefix "${NPM_PREFIX_DIR}" "$@"
+    touch "${stamp}"
+    ;;
+  list)
+    exec ctf-tools
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

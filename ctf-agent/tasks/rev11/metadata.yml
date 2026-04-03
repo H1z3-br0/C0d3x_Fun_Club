@@ -1,0 +1,10 @@
+name: rev11
+category: rev
+value: 100
+description: >
+  ELF 32-bit Rust binary. There are TWO flags hidden inside.
+  The first flag involves XOR + base64.
+  The second flag involves hash bruteforce.
+  Key found previously: farfaraway133742.
+  Partial second flag hint: vsosh{yet_another_hash_bruteforce_but_now_in_rust}
+  Verify both flags by running the binary with correct inputs.
