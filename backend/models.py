@@ -1,9 +1,9 @@
-"""Model utilities — Codex only (CLIProxyAPI)."""
+"""Model utilities — CLIProxyAPI."""
 
 from __future__ import annotations
 
 
-# Default model specs — codex providers use the dedicated solver backend
+# Default model specs — all available solvers
 DEFAULT_MODELS: list[str] = [
     "codex/gpt-5.4",
     "codex/gpt-5.4-mini",
@@ -16,12 +16,16 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.4-mini": 400_000,
     "gpt-5.3-codex": 1_000_000,
     "gpt-5.3-codex-spark": 128_000,
+    "claude-opus-4-6": 200_000,
+    "claude-sonnet-4-6": 200_000,
 }
 
 # Models that support vision
 VISION_MODELS: set[str] = {
     "gpt-5.4",
     "gpt-5.4-mini",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
 }
 
 

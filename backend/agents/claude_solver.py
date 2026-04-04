@@ -250,13 +250,9 @@ class ClaudeSolver:
                     }
             return {}
 
-        from backend.models import effort_from_spec
-        effort = effort_from_spec(self.model_spec)
-
         options = ClaudeAgentOptions(
             model=self.model_id,
             system_prompt=system_prompt,
-            effort=effort,
             # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator
             env={"CLAUDECODE": ""},
             allowed_tools=["Bash", "WebFetch", "WebSearch"],

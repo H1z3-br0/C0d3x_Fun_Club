@@ -46,7 +46,7 @@ def cli() -> None:
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: gpt-5.4)")
+@click.option("--coordinator-model", default=None, help="Model for coordinator (default: auto)")
 @click.option("--coordinator", default="openai", type=click.Choice(["openai"]), help="Coordinator backend")
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
@@ -78,7 +78,10 @@ def main(
         settings.ctfd_token = ctfd_token
     settings.max_concurrent_challenges = max_challenges
 
-    model_specs = list(models) if models else list(DEFAULT_MODELS)
+    if models:
+        model_specs = list(models)
+    else:
+        model_specs = list(DEFAULT_MODELS)
 
     console.print("[bold]CTF Agent v2[/bold]")
     console.print(f"  CTFd: {settings.ctfd_url}")
