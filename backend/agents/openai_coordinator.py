@@ -196,10 +196,13 @@ class OpenAICoordinator:
             "Coordinator context at %d tokens — compacting history", self._last_prompt_tokens
         )
         try:
-            resp = await self.client.chat.completions.create(
+            from backend.agents.openai_solver import _aggregate_stream
+            stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages + [{"role": "user", "content": COMPACT_REQUEST}],
+                stream=True,
             )
+            resp = await _aggregate_stream(stream)
             summary = resp.choices[0].message.content or "No summary generated."
         except Exception as e:
             logger.error("Coordinator compaction failed: %s", e)
@@ -231,13 +234,16 @@ class OpenAICoordinator:
             await self._compact_messages()
 
         self.messages.append({"role": "user", "content": message})
+        from backend.agents.openai_solver import _aggregate_stream
         while True:
-            resp = await self.client.chat.completions.create(
+            stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
                 tools=COORDINATOR_TOOLS,
                 tool_choice="auto",
+                stream=True,
             )
+            resp = await _aggregate_stream(stream)
             if resp.usage:
                 self._last_prompt_tokens = resp.usage.prompt_tokens or 0
 

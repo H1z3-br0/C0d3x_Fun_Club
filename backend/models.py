@@ -8,6 +8,8 @@ DEFAULT_MODELS: list[str] = [
     "codex/gpt-5.4",
     "codex/gpt-5.4-mini",
     "codex/gpt-5.3-codex",
+    "codex/gpt-5.4",
+    "codex/gpt-5.4-mini",
 ]
 
 # Context window sizes (tokens)

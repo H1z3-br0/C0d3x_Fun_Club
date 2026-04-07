@@ -39,6 +39,89 @@ from backend.tracing import SolverTracer
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _AggMessage:
+    role: str = "assistant"
+    content: str | None = None
+    tool_calls: list[Any] | None = None
+
+
+@dataclass
+class _AggChoice:
+    message: _AggMessage
+    finish_reason: str | None = None
+
+
+@dataclass
+class _AggResponse:
+    choices: list[_AggChoice]
+    usage: Any | None = None
+
+
+class _AggToolCall:
+    def __init__(self, tc_id: str, name: str, arguments: str) -> None:
+        self.id = tc_id
+        self.type = "function"
+        self.function = type("F", (), {"name": name, "arguments": arguments})()
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": {"name": self.function.name, "arguments": self.function.arguments},
+        }
+
+
+async def _aggregate_stream(stream: Any) -> _AggResponse:
+    """Aggregate a streaming chat completion into a single response object.
+
+    Workaround for cli-proxy-api 6.9.7 which returns empty `content` and
+    `tool_calls` in non-stream mode for Codex models.
+    """
+    content_parts: list[str] = []
+    # tool_calls indexed by index → {id, name, arguments}
+    tool_calls: dict[int, dict[str, str]] = {}
+    finish_reason: str | None = None
+    usage: Any | None = None
+
+    async for chunk in stream:
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if getattr(delta, "content", None):
+            content_parts.append(delta.content)
+        if getattr(delta, "tool_calls", None):
+            for tc in delta.tool_calls:
+                idx = tc.index if tc.index is not None else 0
+                slot = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] = fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
+        if getattr(choice, "finish_reason", None):
+            finish_reason = choice.finish_reason
+
+    tcs: list[Any] | None = None
+    if tool_calls:
+        tcs = [
+            _AggToolCall(slot["id"] or f"call_{i}", slot["name"], slot["arguments"] or "{}")
+            for i, slot in sorted(tool_calls.items())
+        ]
+    msg = _AggMessage(
+        role="assistant",
+        content="".join(content_parts) if content_parts else None,
+        tool_calls=tcs,
+    )
+    return _AggResponse(choices=[_AggChoice(message=msg, finish_reason=finish_reason)], usage=usage)
+
+
 TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -272,12 +355,17 @@ class OpenAISolver:
                     self._messages.append({"role": "user", "content": "Solve this CTF challenge."})
                     self._started = True
 
-                resp = await self._client.chat.completions.create(
+                # Use streaming because cli-proxy-api 6.9.7 returns empty content
+                # in non-stream mode for Codex models. Aggregate chunks into a
+                # synthetic ChatCompletion-shaped object.
+                stream = await self._client.chat.completions.create(
                     model=self.model_id,
                     messages=self._messages,
                     tools=TOOL_SPECS,
                     tool_choice="auto",
+                    stream=True,
                 )
+                resp = await _aggregate_stream(stream)
 
                 usage = resp.usage
                 if usage:
