@@ -7,16 +7,16 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
+from backend.memory import MemoryStore
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS
 from backend.prompts import ChallengeMeta
-from backend.memory import MemoryStore
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -90,7 +90,6 @@ class ChallengeSwarm:
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
-    findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -131,12 +130,24 @@ class ChallengeSwarm:
         return _notify
 
 
-    def _gather_sibling_insights(self, exclude_model: str) -> str:
-        parts: list[str] = []
-        for model, finding in self.findings.items():
-            if model != exclude_model and finding:
-                parts.append(f"[{model}]: {finding}")
-        return "\n\n".join(parts) if parts else "No sibling insights available yet."
+    async def _gather_sibling_insights(self, exclude_model: str) -> str:
+        """Pull the latest summary per sibling model from the message bus.
+
+        Falls back to the latest progress post when a sibling has never posted a
+        summary yet.
+        """
+        summaries = await self.message_bus.latest_by_model(
+            exclude=exclude_model, tag="summary"
+        )
+        progress = await self.message_bus.latest_by_model(
+            exclude=exclude_model, tag="progress"
+        )
+        merged: dict[str, str] = {m: f.content for m, f in summaries.items()}
+        for model, f in progress.items():
+            merged.setdefault(model, f.content)
+        if not merged:
+            return "No sibling insights available yet."
+        return "\n\n".join(f"[{m}]: {content}" for m, content in merged.items())
 
     # Escalating cooldowns after incorrect submissions (per model)
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
@@ -202,21 +213,31 @@ class ChallengeSwarm:
             flag=None, status=CANCELLED, findings_summary="",
             step_count=0, cost_usd=0.0, log_path="",
         )
+        # Track per-iteration deltas so "broken solver" detection is robust to
+        # solver backends that accumulate step_count/cost_usd across calls.
+        steps_before = 0
+        cost_before = 0.0
         await solver.start()
 
         while not self.cancel_event.is_set():
             result = await solver.run_until_done_or_gave_up()
 
-            # Only broadcast useful findings — skip errors and broken solvers
+            run_steps = result.step_count - steps_before
+            run_cost = result.cost_usd - cost_before
+            steps_before = result.step_count
+            cost_before = result.cost_usd
+
+            # Only broadcast useful findings — skip errors and broken solvers.
             if (result.status not in (ERROR, QUOTA_ERROR)
-                    and not (result.step_count == 0 and result.cost_usd == 0)
+                    and not (run_steps == 0 and run_cost == 0)
                     and result.findings_summary
                     and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
-                self.findings[model_spec] = result.findings_summary
-                await self.message_bus.post(model_spec, result.findings_summary[:500])
+                await self.message_bus.post(
+                    model_spec, result.findings_summary[:500], tag="summary"
+                )
 
             if result.status == FLAG_FOUND:
-                self._save_solution(result, model_spec)
+                await self._save_solution(result, model_spec)
                 self.cancel_event.set()
                 self.winner = result
                 logger.info(
@@ -248,9 +269,9 @@ class ChallengeSwarm:
 
             if result.status in (GAVE_UP, ERROR):
                 self._write_rotation_summary(result, model_spec, reason=result.status)
-                if result.step_count == 0 and result.cost_usd == 0:
+                if run_steps == 0 and run_cost == 0:
                     logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Broken (0 steps, $0) — not bumping"
+                        f"[{self.meta.name}/{model_spec}] Broken (0 steps, $0 this run) — not bumping"
                     )
                     break
 
@@ -275,7 +296,7 @@ class ChallengeSwarm:
                     break  # cancelled during cooldown
                 except TimeoutError:
                     pass  # cooldown elapsed, proceed with bump
-                insights = self._gather_sibling_insights(model_spec)
+                insights = await self._gather_sibling_insights(model_spec)
                 solver.bump(insights)
                 logger.info(
                     f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming"
@@ -319,11 +340,12 @@ class ChallengeSwarm:
             await asyncio.gather(*tasks, return_exceptions=True)
             return None
 
-    def _save_solution(self, result: SolverResult, model_spec: str) -> None:
+    async def _save_solution(self, result: SolverResult, model_spec: str) -> None:
         if not self.memory_store:
             return
         try:
-            techniques = [text for text in self.findings.values() if text]
+            latest = await self.message_bus.latest_by_model()
+            techniques = [f.content for f in latest.values() if f.content]
             techniques_worked = "\n".join(techniques) if techniques else (result.findings_summary or "")
             key_insight = result.findings_summary or f"Flag confirmed by {model_spec}"
             self.memory_store.save_solution(
@@ -347,7 +369,7 @@ class ChallengeSwarm:
             ts = int(time.time())
             summary_path = task_dir / f"summary_{ts}.md"
             lines: list[str] = [
-                f"# Rotation Summary",
+                "# Rotation Summary",
                 f"task: {self.meta.name}",
                 f"model: {model_spec}",
                 f"reason: {reason}",
@@ -371,15 +393,21 @@ class ChallengeSwarm:
         """Cancel all agents for this challenge."""
         self.cancel_event.set()
 
-    def get_status(self) -> dict:
-        """Get per-agent progress and findings."""
+    async def get_status(self) -> dict:
+        """Get per-agent progress and findings (latest summary, else progress)."""
+        summaries = await self.message_bus.latest_by_model(tag="summary")
+        progress = await self.message_bus.latest_by_model(tag="progress")
         return {
             "challenge": self.meta.name,
             "cancelled": self.cancel_event.is_set(),
             "winner": self.winner.flag if self.winner else None,
             "agents": {
                 spec: {
-                    "findings": self.findings.get(spec, ""),
+                    "findings": (
+                        summaries[spec].content if spec in summaries
+                        else progress[spec].content if spec in progress
+                        else ""
+                    ),
                     "status": "running" if spec in self.solvers and not self.cancel_event.is_set()
                              else ("won" if self.winner and self.winner.flag else "finished"),
                 }

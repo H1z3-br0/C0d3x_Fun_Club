@@ -12,14 +12,24 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from backend.console import log_model_text, log_tool_call, log_tool_result, log_usage
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import context_window, model_id_from_spec, supports_vision
-from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.profiles import image_for_profile, suggest_profile
+from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, CONTEXT_LIMIT, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import (
+    CANCELLED,
+    CONTEXT_LIMIT,
+    CORRECT_MARKERS,
+    ERROR,
+    FLAG_FOUND,
+    GAVE_UP,
+    QUOTA_ERROR,
+    SolverResult,
+)
 from backend.tools.core import (
     do_bash,
     do_check_findings,
@@ -33,7 +43,6 @@ from backend.tools.core import (
     do_webhook_get_requests,
     do_write_file,
 )
-from backend.console import log_event, log_model_text, log_tool_call, log_tool_result, log_usage
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
@@ -300,8 +309,11 @@ class OpenAISolver:
         self.cancel_event = self.cancel_event or asyncio.Event()
         profile = suggest_profile(self.meta.category)
         default_image = image_for_profile(profile)
+        # settings.sandbox_image=None → use the per-category profile image.
+        # When the user passes --image, that override wins for every challenge.
+        override = getattr(self.settings, "sandbox_image", None)
         self.sandbox = DockerSandbox(
-            image=getattr(self.settings, "sandbox_image", default_image),
+            image=override or default_image,
             challenge_dir=self.challenge_dir,
             memory_limit=getattr(self.settings, "container_memory_limit", "4g"),
         )
@@ -333,7 +345,7 @@ class OpenAISolver:
         )
 
         base_url = getattr(self.settings, "openai_base_url", "http://localhost:8080/v1")
-        api_key = getattr(self.settings, "openai_api_key", "")
+        api_key = getattr(self.settings, "cliproxy_api_key", "")
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
         self._messages = [
@@ -445,9 +457,12 @@ class OpenAISolver:
                             result = f"{result}\n\n{LOOP_WARNING_MESSAGE}"
                     t_dur = time.monotonic() - t_start
 
-                    if tool_name == "submit_flag" and isinstance(result, str):
-                        if any(m in result for m in CORRECT_MARKERS):
-                            self._confirmed = True
+                    if (
+                        tool_name == "submit_flag"
+                        and isinstance(result, str)
+                        and any(m in result for m in CORRECT_MARKERS)
+                    ):
+                        self._confirmed = True
 
                     self.tracer.tool_result(tool_name, str(result), self._step_count)
                     log_tool_result(self.agent_name, self._step_count, tool_name, str(result)[:500], t_dur)

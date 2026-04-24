@@ -70,6 +70,9 @@ def build_deps(
     return ctfd, cost_tracker, deps
 
 
+PORT_FILE_NAME = ".coordinator-port"
+
+
 async def run_event_loop(
     deps: CoordinatorDeps,
     ctfd: CTFdClient,
@@ -89,8 +92,12 @@ async def run_event_loop(
     poller = CTFdPoller(ctfd=ctfd, interval_s=5.0)
     await poller.start()
 
-    # Start operator message HTTP endpoint
-    msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port)
+    # Start operator message HTTP endpoint. Write the resolved port to
+    # findings_dir/.coordinator-port so `ctf-solve msg` can discover it.
+    findings_dir = Path(getattr(deps.settings, "findings_dir", "findings"))
+    findings_dir.mkdir(parents=True, exist_ok=True)
+    port_file = findings_dir / PORT_FILE_NAME
+    msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port, port_file)
 
     logger.info(
         "Coordinator starting: %d models, %d challenges, %d solved",
@@ -192,6 +199,10 @@ async def run_event_loop(
         if msg_server:
             msg_server.close()
             await msg_server.wait_closed()
+        try:
+            port_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         await poller.stop()
         for swarm in deps.swarms.values():
             swarm.kill()
@@ -234,8 +245,16 @@ async def _auto_spawn_unsolved(deps: CoordinatorDeps, poller) -> None:
         await _auto_spawn_one(deps, name)
 
 
-async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Server | None:
-    """Start a tiny HTTP server that accepts operator messages via POST."""
+async def _start_msg_server(
+    inbox: asyncio.Queue,
+    port: int = 0,
+    port_file: Path | None = None,
+) -> asyncio.Server | None:
+    """Start a tiny HTTP server that accepts operator messages via POST.
+
+    When `port_file` is provided, the resolved port is written there so
+    `ctf-solve msg` can discover it (default when `port=0`).
+    """
 
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -278,6 +297,11 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
         server = await asyncio.start_server(_handle, "127.0.0.1", port)
         actual_port = server.sockets[0].getsockname()[1]
         logger.info(f"Operator message endpoint listening on http://127.0.0.1:{actual_port}")
+        if port_file is not None:
+            try:
+                port_file.write_text(str(actual_port))
+            except OSError as e:
+                logger.warning(f"Could not write port file {port_file}: {e}")
         return server
     except OSError as e:
         logger.warning(f"Could not start operator message endpoint: {e}")

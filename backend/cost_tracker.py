@@ -23,7 +23,7 @@ class RunUsage:
     def has_values(self) -> bool:
         return any((self.input_tokens, self.output_tokens, self.cache_read_tokens))
 
-    def __iadd__(self, other: "RunUsage") -> "RunUsage":
+    def __iadd__(self, other: RunUsage) -> RunUsage:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens

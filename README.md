@@ -1,20 +1,15 @@
 # CTF Agent
 
-Autonomous CTF (Capture The Flag) solver that races multiple AI models against challenges in parallel. Built in a weekend, we used it to solve all 52/52 challenges and win **1st place at BSidesSF 2026 CTF**.
-
-Built by [Veria Labs](https://verialabs.com), founded by members of [.;,;.](https://ctftime.org/team/222911) (smiley), the [#1 US CTF team on CTFTime in 2024 and 2025](https://ctftime.org/stats/2024/US). We build AI agents that find and exploit real security vulnerabilities for large enterprises.
-
-## Results
-
-| Competition | Challenges Solved | Result |
-|-------------|:-:|--------|
-| **BSidesSF 2026** | 52/52 (100%) | **1st place ($1,500)** |
-
-The agent solves challenges across all categories — pwn, rev, crypto, forensics, web, and misc.
+Autonomous CTF (Capture The Flag) solver that races multiple AI models against
+challenges in parallel. All LLM traffic is routed through a local
+[CLIProxyAPI](https://github.com/router-for-me/cli-proxy-api) instance, which
+fans out to Codex / Claude / Gemini via OAuth-backed accounts.
 
 ## How It Works
 
-A **coordinator** LLM manages the competition while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to find the flag wins.
+A **coordinator** LLM manages the competition while **solver swarms** attack
+individual challenges. Each swarm runs multiple models simultaneously — the
+first to find the flag wins.
 
 ```
                         +-----------------+
@@ -27,7 +22,6 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
                                  |
                         +--------v--------+
                         | Coordinator LLM |
-                        | (Claude/Codex)  |
                         +--------+--------+
                                  |
               +------------------+------------------+
@@ -35,40 +29,60 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
      +--------v--------+ +------v---------+ +------v---------+
      | Swarm:          | | Swarm:         | | Swarm:         |
      | challenge-1     | | challenge-2    | | challenge-N    |
-     |                 | |                | |                |
-     |  Opus (med)     | |  Opus (med)    | |                |
-     |  Opus (max)     | |  Opus (max)    | |     ...        |
-     |  GPT-5.4        | |  GPT-5.4       | |                |
-     |  GPT-5.4-mini   | |  GPT-5.4-mini  | |                |
-     |  GPT-5.3-codex  | |  GPT-5.3-codex | |                |
-     +--------+--------+ +--------+-------+ +----------------+
-              |                    |
-     +--------v--------+  +-------v--------+
-     | Docker Sandbox  |  | Docker Sandbox |
-     | (isolated)      |  | (isolated)     |
-     |                 |  |                |
-     | pwntools, r2,   |  | pwntools, r2,  |
-     | gdb, python...  |  | gdb, python... |
-     +-----------------+  +----------------+
+     +--------+--------+ +--------+-------+ +--------+-------+
+              |                   |                  |
+              +-------------------+------------------+
+                                  |
+                          +-------v-------+
+                          |  CLIProxyAPI  |
+                          |  :8317 /v1    |
+                          +-------+-------+
+                                  |
+               +------------------+------------------+
+               |                  |                  |
+         +-----v-----+      +-----v-----+      +-----v-----+
+         |  Codex    |      |  Claude   |      |  Gemini   |
+         |  OAuth    |      |  OAuth    |      |  OAuth    |
+         +-----------+      +-----------+      +-----------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools pre-installed. Solvers never give up — they keep trying different approaches until the flag is found.
+Each solver runs in an isolated Docker container with CTF tools pre-installed.
+Solvers never give up — they keep trying different approaches until the flag is
+found or the coordinator kills the swarm.
+
+## Prerequisites
+
+- Python 3.12+
+- Docker
+- A running [cli-proxy-api](https://github.com/router-for-me/cli-proxy-api)
+  instance with at least one upstream OAuth account configured (Codex / Claude /
+  Gemini). Default port expected: **8317**.
+
+The agent does **not** call upstream LLM APIs directly. It always goes through
+`cli-proxy-api`'s OpenAI-compatible `/v1/chat/completions` endpoint.
 
 ## Quick Start
 
 ```bash
-# Install
+# 1. Start cli-proxy-api (port 8317 by default)
+/home/dima/cliproxyapi/cli-proxy-api --config /home/dima/cliproxyapi/config.yaml
+
+# 2. Install this project
 uv sync
 
-# Build sandbox image
-docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .
+# 3. Build the base sandbox image
+docker build -f sandbox/Dockerfile.sandbox -t ctf-swarm:base .
 
-# Configure credentials
+# 4. (Optional) Build profile images for per-category sandboxes
+./build_profiles.sh  # builds ctf-swarm:web, ctf-swarm:crypto, etc.
+
+# 5. Configure
 cp .env.example .env
-# Edit .env with your API keys and CTFd token
+# Edit .env — set OPENAI_API_KEY to one of the keys from cliproxyapi/config.yaml
+#             set CTFD_URL / CTFD_TOKEN
 
-# Run against a CTFd instance
-uv run ctf-solve \
+# 6. Run against a CTFd instance
+uv run ctf-solve run \
   --ctfd-url https://ctf.example.com \
   --ctfd-token ctfd_your_token \
   --challenges-dir challenges \
@@ -76,77 +90,81 @@ uv run ctf-solve \
   -v
 ```
 
-## Coordinator Backends
-
-```bash
-# Claude SDK coordinator (default)
-uv run ctf-solve --coordinator claude ...
-
-# Codex coordinator (GPT-5.4 via JSON-RPC)
-uv run ctf-solve --coordinator codex ...
-```
-
 ## Solver Models
 
-Default model lineup (configurable in `backend/models.py`):
+The `DEFAULT_MODELS` list in [backend/models.py](backend/models.py) specifies
+which model aliases to spawn per challenge:
 
-| Model | Provider | Notes |
-|-------|----------|-------|
-| Claude Opus 4.6 (medium) | Claude SDK | Balanced speed/quality |
-| Claude Opus 4.6 (max) | Claude SDK | Deep reasoning |
-| GPT-5.4 | Codex | Best overall solver |
-| GPT-5.4-mini | Codex | Fast, good for easy challenges |
-| GPT-5.3-codex | Codex | Reasoning model (xhigh effort) |
+| Spec | Notes |
+|------|-------|
+| `codex/gpt-5.4` | Best overall solver |
+| `codex/gpt-5.4-mini` | Fast, good for easy challenges |
+| `codex/gpt-5.3-codex` | Reasoning-heavy |
 
-## Sandbox Tooling
+These names must match aliases exposed by your `cliproxyapi/config.yaml`. The
+`codex/` prefix is informational — the proxy routes by model alias. Override
+with `--models codex/gpt-5.4 codex/gpt-5.4-mini`.
 
-Each solver gets an isolated Docker container pre-loaded with CTF tools:
+## Sandbox Profiles
+
+Per-category Docker images are defined in [Dockerfile](Dockerfile). If
+`--image` is not passed, each swarm picks a profile by challenge category
+(see [backend/profiles.py](backend/profiles.py:suggest_profile) — e.g.
+`crypto → ctf-swarm:crypto`, `web → ctf-swarm:web`). Pass `--image
+ctf-swarm:base` to force a single image for every challenge.
+
+Tooling per profile (non-exhaustive):
 
 | Category | Tools |
 |----------|-------|
-| **Binary** | radare2, GDB, objdump, binwalk, strings, readelf |
+| **Binary** | radare2, GDB, objdump, binwalk, readelf |
 | **Pwn** | pwntools, ROPgadget, angr, unicorn, capstone |
-| **Crypto** | SageMath, RsaCtfTool, z3, gmpy2, pycryptodome, cado-nfs |
-| **Forensics** | volatility3, Sleuthkit (mmls/fls/icat), foremost, exiftool |
-| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract OCR |
-| **Web** | curl, nmap, Python requests, flask |
-| **Misc** | ffmpeg, sox, Pillow, numpy, scipy, PyTorch, podman |
+| **Crypto** | SageMath, z3, gmpy2, pycryptodome |
+| **Forensics** | volatility3, Sleuthkit, foremost, exiftool |
+| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract |
+| **Web** | curl, nmap, sqlmap, ffuf, gobuster |
+| **Mobile** | jadx, apktool, smali/baksmali, frida-tools |
+
+## Operator Messaging
+
+While the coordinator is running, you can push hints to it:
+
+```bash
+uv run ctf-solve msg "try RSA Wiener on crypto-3"
+```
+
+The coordinator writes its chosen port to `findings/.coordinator-port` on
+startup, so `msg` discovers it automatically. Override with `--port` if needed.
 
 ## Features
 
-- **Multi-model racing** — multiple AI models attack each challenge simultaneously
-- **Auto-spawn** — new challenges detected and attacked automatically
-- **Coordinator LLM** — reads solver traces, crafts targeted technical guidance
-- **Cross-solver insights** — findings shared between models via message bus
-- **Docker sandboxes** — isolated containers with full CTF tooling
-- **Operator messaging** — send hints to running solvers mid-competition
+- Multi-model racing on every challenge
+- Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
+- Coordinator LLM reads per-solver traces and crafts targeted bumps
+- Cross-solver insights shared through a message bus with per-model cursors
+- Docker sandboxes isolated per solver
+- Deduplicated flag submission with per-submitter escalating cooldown
+- Graceful proxy health-check on startup (fail fast if cli-proxy-api is down)
+- Persistent memory of past solves via LanceDB (hash-bag-of-words embedding)
 
-## Configuration
+## Configuration cheatsheet
 
-Copy `.env.example` to `.env` and fill in your keys:
-
-```bash
-cp .env.example .env
-```
+`.env`:
 
 ```env
 CTFD_URL=https://ctf.example.com
 CTFD_TOKEN=ctfd_your_token
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
+OPENAI_BASE_URL=http://127.0.0.1:8317/v1
+OPENAI_API_KEY=sk-from-cliproxyapi-config-yaml
 ```
 
-All settings can also be passed as environment variables or CLI flags.
-
-## Requirements
-
-- Python 3.14+
-- Docker
-- API keys for at least one provider (Anthropic, OpenAI, Google)
-- `codex` CLI (for Codex solver/coordinator)
-- `claude` CLI (bundled with claude-agent-sdk)
+`cliproxyapi/config.yaml` must expose the model aliases used in
+`DEFAULT_MODELS` (through `codex-api-key`, `openai-compatibility`, or OAuth
+accounts in `~/.cli-proxy-api/*.json`).
 
 ## Acknowledgements
 
-- [es3n1n/Eruditus](https://github.com/es3n1n/Eruditus) — CTFd interaction and HTML helpers in `pull_challenges.py`
+- [es3n1n/Eruditus](https://github.com/es3n1n/Eruditus) — CTFd interaction and
+  HTML helpers in `pull_challenges.py`
+- [router-for-me/cli-proxy-api](https://github.com/router-for-me/cli-proxy-api)
+  — local OpenAI-compatible proxy that fans out to OAuth-backed upstreams

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -181,7 +180,7 @@ class OpenAICoordinator:
         self.model = model
         self.settings = settings
         base_url = getattr(settings, "openai_base_url", "http://localhost:8080/v1") if settings else "http://localhost:8080/v1"
-        api_key = getattr(settings, "openai_api_key", "") if settings else ""
+        api_key = getattr(settings, "cliproxy_api_key", "") if settings else ""
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": COORDINATOR_PROMPT},
@@ -206,8 +205,23 @@ class OpenAICoordinator:
             summary = resp.choices[0].message.content or "No summary generated."
         except Exception as e:
             logger.error("Coordinator compaction failed: %s", e)
-            # Fallback: drop all but system prompt and last 10 messages
-            self.messages = self.messages[:1] + self.messages[-10:]
+            # Fallback: collapse everything past the system prompt into a single
+            # user notice. Naive tail-slicing (messages[-N:]) can strand `role=tool`
+            # messages without their matching `assistant.tool_calls`, which the
+            # OpenAI-compatible API rejects with 400. Full reset avoids that.
+            system_msg = self.messages[0] if self.messages else {"role": "system", "content": ""}
+            self.messages = [
+                system_msg,
+                {
+                    "role": "user",
+                    "content": (
+                        "=== CONTEXT COMPACTION FAILED — previous history discarded ===\n"
+                        "You no longer have access to earlier turns. Re-establish state by "
+                        "calling `get_solve_status` and `fetch_challenges`, then continue."
+                    ),
+                },
+            ]
+            self._last_prompt_tokens = 0
             return
 
         self.messages = [

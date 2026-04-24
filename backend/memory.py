@@ -5,13 +5,12 @@ import math
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import lancedb
 import pyarrow as pa
-
 
 EMBED_DIM = 256
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{2,}")
@@ -106,7 +105,7 @@ class MemoryStore:
             key_insight=key_insight,
             flag=flag,
             writeup_path=writeup_path,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             text=text,
             vector=self._embed(text or task_name),
         )

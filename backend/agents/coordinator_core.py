@@ -33,7 +33,9 @@ async def do_fetch_challenges(deps: CoordinatorDeps) -> str:
 
 async def do_get_solve_status(deps: CoordinatorDeps) -> str:
     solved = await deps.ctfd.fetch_solved_names()
-    swarm_status = {name: swarm.get_status() for name, swarm in deps.swarms.items()}
+    swarm_status = {
+        name: await swarm.get_status() for name, swarm in deps.swarms.items()
+    }
     return json.dumps({"solved": sorted(solved), "active_swarms": swarm_status}, indent=2)
 
 
@@ -106,12 +108,29 @@ async def do_check_swarm_status(deps: CoordinatorDeps, challenge_name: str) -> s
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
         return f"No swarm running for {challenge_name}"
-    return json.dumps(swarm.get_status(), indent=2)
+    return json.dumps(await swarm.get_status(), indent=2)
 
 
 async def do_submit_flag(deps: CoordinatorDeps, challenge_name: str, flag: str) -> str:
+    """Coordinator-side flag submission.
+
+    Routes through the active swarm's `try_submit_flag` so dedup, per-submitter
+    cooldowns and the "already confirmed" check apply uniformly — regardless of
+    whether the flag came from a solver or the coordinator. Falls back to a
+    direct CTFd submit only when no swarm exists for this challenge (rare, but
+    possible if the coordinator submits from memory without spawning).
+    """
     if deps.no_submit:
         return f'DRY RUN — would submit "{flag.strip()}" for {challenge_name}'
+
+    swarm = deps.swarms.get(challenge_name)
+    if swarm is not None:
+        try:
+            display, _ = await swarm.try_submit_flag(flag, model_spec="coordinator")
+            return display
+        except Exception as e:
+            return f"submit_flag error: {e}"
+
     try:
         result = await deps.ctfd.submit_flag(challenge_name, flag)
         return result.display

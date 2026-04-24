@@ -1,15 +1,20 @@
-"""Model utilities — CLIProxyAPI."""
+"""Model utilities — CLIProxyAPI.
+
+All routing happens through cli-proxy-api's OpenAI-compatible `/v1/chat/completions`
+endpoint. The `provider/` prefix in specs is informational and optionally maps onto
+cli-proxy-api's `force-model-prefix` feature when enabled in cliproxyapi/config.yaml.
+By default (`force-model-prefix: false`) the prefix is stripped at call time via
+`model_id_from_spec` and the upstream is selected by alias matching inside the proxy.
+"""
 
 from __future__ import annotations
 
-
-# Default model specs — all available solvers
+# Default model specs — one entry per unique solver.
+# These names must match an alias exposed by cli-proxy-api's config.yaml.
 DEFAULT_MODELS: list[str] = [
     "codex/gpt-5.4",
     "codex/gpt-5.4-mini",
     "codex/gpt-5.3-codex",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
 ]
 
 # Context window sizes (tokens)

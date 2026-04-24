@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -162,14 +163,26 @@ class CTFdClient:
         return SubmitResult("unknown", message, f"Unknown status: {status}")
 
     async def fetch_all_challenges(self) -> list[dict[str, Any]]:
+        """Fetch all non-hidden challenges with full details.
+
+        The per-challenge detail fetch is parallelized under a semaphore to keep
+        CTFd happy on large CTFs (52+ challenges).
+        """
         data = await self._get("/challenges?per_page=500")
-        challenges = []
-        for stub in data.get("data", []):
-            if stub.get("type") == "hidden":
-                continue
-            detail = await self._get(f"/challenges/{stub['id']}")
-            challenges.append(detail["data"])
-        return challenges
+        stubs = [s for s in data.get("data", []) if s.get("type") != "hidden"]
+        sem = asyncio.Semaphore(8)
+
+        async def _one(stub: dict[str, Any]) -> dict[str, Any] | None:
+            async with sem:
+                try:
+                    detail = await self._get(f"/challenges/{stub['id']}")
+                    return detail["data"]
+                except Exception as e:
+                    logger.warning("Failed to fetch challenge %s: %s", stub.get("id"), e)
+                    return None
+
+        results = await asyncio.gather(*(_one(s) for s in stubs))
+        return [r for r in results if r is not None]
 
     async def fetch_solved_names(self) -> set[str]:
         try:

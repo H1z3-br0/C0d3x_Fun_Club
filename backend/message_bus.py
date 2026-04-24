@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 class Finding:
     model: str
     content: str
+    # tag distinguishes different kinds of posts:
+    #   "progress" — mid-run status update (posted every N steps)
+    #   "summary"  — final findings summary after a solver loop iteration
+    #   "coordinator" — broadcast from the coordinator
+    tag: str = "progress"
     timestamp: float = field(default_factory=time.time)
 
 
@@ -25,10 +30,10 @@ class ChallengeMessageBus:
     cursors: dict[str, int] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def post(self, model: str, content: str) -> None:
+    async def post(self, model: str, content: str, tag: str = "progress") -> None:
         """Post a finding from a solver."""
         async with self._lock:
-            self.findings.append(Finding(model=model, content=content))
+            self.findings.append(Finding(model=model, content=content, tag=tag))
             if len(self.findings) > MAX_FINDINGS:
                 trim = len(self.findings) - MAX_FINDINGS
                 self.findings = self.findings[trim:]
@@ -44,7 +49,27 @@ class ChallengeMessageBus:
 
     async def broadcast(self, content: str, source: str = "coordinator") -> None:
         """Coordinator broadcasts a message to all solvers."""
-        await self.post(source, content)
+        await self.post(source, content, tag="coordinator")
+
+    async def latest_by_model(
+        self,
+        *,
+        exclude: str | None = None,
+        tag: str | None = None,
+    ) -> dict[str, Finding]:
+        """Return the most recent Finding per model, optionally filtered by tag.
+
+        Used to gather sibling insights for a bump without touching cursors.
+        """
+        async with self._lock:
+            latest: dict[str, Finding] = {}
+            for f in self.findings:
+                if exclude is not None and f.model == exclude:
+                    continue
+                if tag is not None and f.tag != tag:
+                    continue
+                latest[f.model] = f  # later overwrites earlier → newest wins
+            return latest
 
     def format_unread(self, findings: list[Finding]) -> str:
         """Format findings for injection into a solver prompt."""

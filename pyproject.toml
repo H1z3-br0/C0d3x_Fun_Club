@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "CTF agent v2 — multi-model solver swarm"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic-ai",
     "pydantic-settings",
     "genai-prices",
     "aiodocker",
