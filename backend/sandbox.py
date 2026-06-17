@@ -222,6 +222,24 @@ class DockerSandbox:
         info = await self._container.show()
         logger.info("Container restarted: %s (restart #%d)", info["Id"][:12], self._restart_count)
 
+    async def _ensure_restarted(self) -> None:
+        """Restart the container at most once across concurrent callers.
+
+        When several agents share this container and it dies, each in-flight
+        operation hits a "gone" error simultaneously. The lock serializes them;
+        the liveness check means only the first actually restarts — the rest see
+        a healthy container and return.
+        """
+        async with self._lock:
+            if self._container is not None:
+                try:
+                    info = await self._container.show()
+                    if info.get("State", {}).get("Running"):
+                        return
+                except Exception:
+                    pass  # treat as gone — fall through to restart
+            await self._restart_container()
+
     def _is_gone_error(self, e: Exception) -> bool:
         msg = str(e).lower()
         return "404" in msg or "no such container" in msg or "not found" in msg
@@ -230,24 +248,26 @@ class DockerSandbox:
         if not self._container:
             raise RuntimeError("Sandbox not started")
 
-        async with self._lock:
+        # No global lock here: this container is shared by all agents racing on
+        # the challenge, and docker exec calls are independent — they run in
+        # parallel. The lock is only taken to serialize container restarts.
+        try:
+            return await self._exec_inner(command, timeout_s)
+        except aiodocker.exceptions.DockerError as e:
+            if not self._is_gone_error(e):
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
             try:
-                return await self._exec_inner(command, timeout_s)
-            except aiodocker.exceptions.DockerError as e:
-                if not self._is_gone_error(e):
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
-                try:
-                    await self._restart_container()
-                    note = (
-                        "NOTE: The sandbox container was automatically restarted. "
-                        "/challenge/distfiles and /challenge/workspace are preserved. "
-                        "Any files you created in /tmp are lost — recreate them if needed."
-                    )
-                    result = await self._exec_inner(command, timeout_s)
-                    result.stderr = (note + "\n" + result.stderr).strip()
-                    return result
-                except Exception as restart_err:
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
+                await self._ensure_restarted()
+                note = (
+                    "NOTE: The sandbox container was automatically restarted. "
+                    "/challenge/distfiles and /challenge/workspace are preserved. "
+                    "Any files you created in /tmp are lost — recreate them if needed."
+                )
+                result = await self._exec_inner(command, timeout_s)
+                result.stderr = (note + "\n" + result.stderr).strip()
+                return result
+            except Exception as restart_err:
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
 
     async def _exec_inner(self, command: str, timeout_s: int) -> ExecResult:
         # Wrap command with `timeout` so the container kills the process on expiry.
@@ -310,7 +330,7 @@ class DockerSandbox:
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._ensure_restarted()
                     tar = await asyncio.wait_for(self._container.get_archive(path), timeout=30)
                 except Exception as restart_err:
                     raise RuntimeError(f"Container gone and restart failed: {restart_err}") from e
@@ -362,7 +382,7 @@ class DockerSandbox:
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._ensure_restarted()
                     await asyncio.wait_for(
                         self._container.put_archive(str(Path(path).parent), buf.getvalue()),
                         timeout=30,

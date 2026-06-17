@@ -46,9 +46,11 @@ first to find the flag wins.
          +-----------+      +-----------+      +-----------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools pre-installed.
-Solvers never give up — they keep trying different approaches until the flag is
-found or the coordinator kills the swarm.
+Each challenge runs in its own Docker container, picked by the challenge's
+category (crypto, web, pwn, …), with the matching CTF tools pre-installed. All
+solver agents racing on that challenge share the one container and its
+`/challenge/workspace`. Solvers never give up — they keep trying different
+approaches until the flag is found or the coordinator kills the swarm.
 
 ## Prerequisites
 
@@ -142,7 +144,7 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 - Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
 - Coordinator LLM reads per-solver traces and crafts targeted bumps
 - Cross-solver insights shared through a message bus with per-model cursors
-- Docker sandboxes isolated per solver
+- One Docker sandbox per challenge (by category), shared by its solver agents
 - Deduplicated flag submission with per-submitter escalating cooldown
 - Graceful proxy health-check on startup (fail fast if cli-proxy-api is down)
 - Persistent memory of past solves via LanceDB (hash-bag-of-words embedding)

@@ -16,7 +16,9 @@ from backend.ctfd import CTFdClient
 from backend.memory import MemoryStore
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS
+from backend.profiles import image_for_profile, suggest_profile
 from backend.prompts import ChallengeMeta
+from backend.sandbox import DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -89,6 +91,9 @@ class ChallengeSwarm:
     memory_store: MemoryStore | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # One Docker container per challenge, picked by category, shared by all the
+    # solver agents racing on this challenge. Built and torn down in run().
+    sandbox: DockerSandbox | None = None
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
@@ -97,6 +102,22 @@ class ChallengeSwarm:
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+
+    def _build_sandbox(self) -> DockerSandbox:
+        """Build the single per-challenge container, picked by category profile.
+
+        ``settings.sandbox_image`` (set via ``--image``) forces one image for
+        every challenge; otherwise the image is chosen from the challenge's
+        category (e.g. ``crypto`` → ``ctf-swarm:crypto``).
+        """
+        override = getattr(self.settings, "sandbox_image", None)
+        image = override or image_for_profile(suggest_profile(self.meta.category))
+        return DockerSandbox(
+            image=image,
+            challenge_dir=self.challenge_dir,
+            memory_limit=getattr(self.settings, "container_memory_limit", "16g"),
+        )
+
     def _create_solver(self, model_spec: str):
         """Create the right solver type based on provider.
 
@@ -113,6 +134,7 @@ class ChallengeSwarm:
             ctfd=self.ctfd,
             cost_tracker=self.cost_tracker,
             settings=self.settings,
+            sandbox=self.sandbox,
             cancel_event=self.cancel_event,
             no_submit=self.no_submit,
             submit_fn=_submit_fn,
@@ -306,6 +328,27 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
+        """Start the shared container, race all solvers, then tear it down."""
+        self.sandbox = self._build_sandbox()
+        try:
+            await self.sandbox.start()
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to start challenge container (%s): %s",
+                self.meta.name, self.sandbox.image, e, exc_info=True,
+            )
+            await self.sandbox.stop()
+            self.sandbox = None
+            return None
+
+        try:
+            return await self._race_solvers()
+        finally:
+            if self.sandbox:
+                await self.sandbox.stop()
+                self.sandbox = None
+
+    async def _race_solvers(self) -> SolverResult | None:
         """Run all solvers in parallel. Returns the winner's result or None."""
         tasks = [
             asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
