@@ -77,11 +77,12 @@ class ExecResult:
 
 @dataclass
 class DockerSandbox:
-    """Isolated Docker container for a single solver agent."""
+    """One Docker container per challenge, shared by that challenge's agents."""
 
     image: str
     challenge_dir: str
     memory_limit: str = "16g"
+    challenge_name: str = ""
     workspace_dir: str = ""
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
@@ -90,6 +91,14 @@ class DockerSandbox:
     _restart_count: int = field(default=0, repr=False)
 
     MAX_RESTARTS = 3
+
+    def _labels(self) -> dict[str, str]:
+        labels = {CONTAINER_LABEL: "true"}
+        if self.challenge_name:
+            # Lets `docker ps --filter label=ctf-agent` show which task a
+            # container belongs to (one container per challenge).
+            labels["ctf-challenge"] = self.challenge_name
+        return labels
 
     @property
     def container_id(self) -> str:
@@ -144,7 +153,7 @@ class DockerSandbox:
                 "Cmd": ["sleep", "infinity"],
                 "WorkingDir": "/challenge/workspace",
                 "Tty": False,
-                "Labels": {CONTAINER_LABEL: "true"},
+                "Labels": self._labels(),
                 "HostConfig": {
                     "Binds": binds,
                     "ExtraHosts": ["host.docker.internal:host-gateway"],
@@ -205,7 +214,7 @@ class DockerSandbox:
             "Cmd": ["sleep", "infinity"],
             "WorkingDir": "/challenge/workspace",
             "Tty": False,
-            "Labels": {CONTAINER_LABEL: "true"},
+            "Labels": self._labels(),
             "HostConfig": {
                 "Binds": self._binds,
                 "ExtraHosts": ["host.docker.internal:host-gateway"],

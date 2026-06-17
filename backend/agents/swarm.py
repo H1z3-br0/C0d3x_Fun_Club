@@ -115,6 +115,7 @@ class ChallengeSwarm:
         return DockerSandbox(
             image=image,
             challenge_dir=self.challenge_dir,
+            challenge_name=self.meta.name,
             memory_limit=getattr(self.settings, "container_memory_limit", "16g"),
         )
 
