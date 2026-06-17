@@ -16,9 +16,8 @@ from backend.ctfd import CTFdClient
 from backend.memory import MemoryStore
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS
-from backend.profiles import image_for_profile, suggest_profile
 from backend.prompts import ChallengeMeta
-from backend.sandbox import DockerSandbox
+from backend.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -104,14 +103,14 @@ class ChallengeSwarm:
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
 
     def _build_sandbox(self) -> DockerSandbox:
-        """Build the single per-challenge container, picked by category profile.
+        """Build the one container for this challenge.
 
-        ``settings.sandbox_image`` (set via ``--image``) forces one image for
-        every challenge; otherwise the image is chosen from the challenge's
-        category (e.g. ``crypto`` → ``ctf-swarm:crypto``).
+        A single base image is used for every challenge; agents install any
+        domain tools they need at runtime. ``settings.sandbox_image`` (set via
+        ``--image``) overrides the image for every challenge.
         """
         override = getattr(self.settings, "sandbox_image", None)
-        image = override or image_for_profile(suggest_profile(self.meta.category))
+        image = override or DEFAULT_SANDBOX_IMAGE
         return DockerSandbox(
             image=image,
             challenge_dir=self.challenge_dir,

@@ -46,8 +46,8 @@ first to find the flag wins.
          +-----------+      +-----------+      +-----------+
 ```
 
-Each challenge runs in its own Docker container, picked by the challenge's
-category (crypto, web, pwn, …), with the matching CTF tools pre-installed. All
+Each challenge runs in its own Docker container, spawned from a single base
+image; the agent installs whatever domain tools it needs at runtime. All
 solver agents racing on that challenge share the one container and its
 `/challenge/workspace`. Solvers never give up — they keep trying different
 approaches until the flag is found or the coordinator kills the swarm.
@@ -72,18 +72,15 @@ The agent does **not** call upstream LLM APIs directly. It always goes through
 # 2. Install this project
 uv sync
 
-# 3. Build the base sandbox image
-docker build -f sandbox/Dockerfile.sandbox -t ctf-swarm:base .
+# 3. Build the single sandbox image
+./build_profiles.sh  # builds ctf-swarm:base (the one image used for every task)
 
-# 4. (Optional) Build profile images for per-category sandboxes
-./build_profiles.sh  # builds ctf-swarm:web, ctf-swarm:crypto, etc.
-
-# 5. Configure
+# 4. Configure
 cp .env.example .env
 # Edit .env — set OPENAI_API_KEY to one of the keys from cliproxyapi/config.yaml
 #             set CTFD_URL / CTFD_TOKEN
 
-# 6. Run against a CTFd instance
+# 5. Run against a CTFd instance
 uv run ctf-solve run \
   --ctfd-url https://ctf.example.com \
   --ctfd-token ctfd_your_token \
@@ -107,25 +104,19 @@ These names must match aliases exposed by your `cliproxyapi/config.yaml`. The
 `codex/` prefix is informational — the proxy routes by model alias. Override
 with `--models codex/gpt-5.4 codex/gpt-5.4-mini`.
 
-## Sandbox Profiles
+## Sandbox
 
-Per-category Docker images are defined in [Dockerfile](Dockerfile). If
-`--image` is not passed, each swarm picks a profile by challenge category
-(see [backend/profiles.py](backend/profiles.py:suggest_profile) — e.g.
-`crypto → ctf-swarm:crypto`, `web → ctf-swarm:web`). Pass `--image
-ctf-swarm:base` to force a single image for every challenge.
+There is **one image for every challenge** — `ctf-swarm:base` (override with
+`--image`). It ships only the package managers and core toolchain (python/pip,
+node/npm, go, apt, build-essential, gdb, binutils, git, curl) plus a tiny CTF
+core (pwntools, pycryptodome, python-magic). Anything domain-specific
+(radare2, sagemath, volatility, jadx, …) the agent **installs at runtime**
+inside its container.
 
-Tooling per profile (non-exhaustive):
-
-| Category | Tools |
-|----------|-------|
-| **Binary** | radare2, GDB, objdump, binwalk, readelf |
-| **Pwn** | pwntools, ROPgadget, angr, unicorn, capstone |
-| **Crypto** | SageMath, z3, gmpy2, pycryptodome |
-| **Forensics** | volatility3, Sleuthkit, foremost, exiftool |
-| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract |
-| **Web** | curl, nmap, sqlmap, ffuf, gobuster |
-| **Mobile** | jadx, apktool, smali/baksmali, frida-tools |
+Each challenge gets its own container (labelled `ctf-challenge=<name>`), and
+all solver agents racing on that challenge share it and its
+`/challenge/workspace`. Containers are created per task from the one image and
+destroyed when the task finishes — only the image is built ahead of time.
 
 ## Operator Messaging
 
@@ -144,7 +135,7 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 - Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
 - Coordinator LLM reads per-solver traces and crafts targeted bumps
 - Cross-solver insights shared through a message bus with per-model cursors
-- One Docker sandbox per challenge (by category), shared by its solver agents
+- One Docker sandbox per challenge, shared by its solver agents (tools installed at runtime)
 - Deduplicated flag submission with per-submitter escalating cooldown
 - Graceful proxy health-check on startup (fail fast if cli-proxy-api is down)
 - Persistent memory of past solves via LanceDB (hash-bag-of-words embedding)
