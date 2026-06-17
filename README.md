@@ -45,9 +45,11 @@ individual challenges. The coordinator and solvers are locked to GPT-5.5.
          +-----------+      +-----------+      +-----------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools pre-installed.
-Solvers never give up — they keep trying different approaches until the flag is
-found or the coordinator kills the swarm.
+Each solver runs in an isolated Docker container spawned from a single minimal
+image. The image ships only the base toolchain (python/pip, node/npm, go, gcc,
+gdb); each solver installs the domain tools it needs at runtime via the
+`ctf-install` helper. Solvers never give up — they keep trying different
+approaches until the flag is found or the coordinator kills the swarm.
 
 ## Prerequisites
 
@@ -69,18 +71,15 @@ The agent does **not** call upstream LLM APIs directly. It always goes through
 # 2. Install this project
 uv sync
 
-# 3. Build the base sandbox image
-docker build -f sandbox/Dockerfile.sandbox -t ctf-swarm:base .
+# 3. Build the sandbox image (one image, used for every solver container)
+./build_profiles.sh  # builds ctf-swarm:base from Dockerfile
 
-# 4. (Optional) Build profile images for per-category sandboxes
-./build_profiles.sh  # builds ctf-swarm:web, ctf-swarm:crypto, etc.
-
-# 5. Configure
+# 4. Configure
 cp .env.example .env
 # Edit .env — set OPENAI_API_KEY to one of the keys from cliproxyapi/config.yaml
 #             set CTFD_URL / CTFD_TOKEN
 
-# 6. Run against a CTFd instance
+# 5. Run against a CTFd instance
 uv run ctf-solve run \
   --ctfd-url https://ctf.example.com \
   --ctfd-token ctfd_your_token \
@@ -103,25 +102,25 @@ prefix is informational - the proxy routes by model alias. Passing any model
 other than `gpt-5.5` through `--models` or `--coordinator-model` fails at
 startup.
 
-## Sandbox Profiles
+## Sandbox image
 
-Per-category Docker images are defined in [Dockerfile](Dockerfile). If
-`--image` is not passed, each swarm picks a profile by challenge category
-(see [backend/profiles.py](backend/profiles.py:suggest_profile) — e.g.
-`crypto → ctf-swarm:crypto`, `web → ctf-swarm:web`). Pass `--image
-ctf-swarm:base` to force a single image for every challenge.
+There is **one image** ([Dockerfile](Dockerfile), `ctf-swarm:base`) for every
+solver container. It contains only the package managers and core toolchain —
+`python3`/`pip`, `node`/`npm`, `go`, `apt`, plus `build-essential`, `gdb`,
+`binutils`, `git`, `curl` and the `pwntools`/`pycryptodome` Python core.
 
-Tooling per profile (non-exhaustive):
+Everything domain-specific is installed at runtime by the agent via the
+[`ctf-install`](container/ctf-install) helper, which caches into a shared
+tool-cache for the run:
 
-| Category | Tools |
-|----------|-------|
-| **Binary** | radare2, GDB, objdump, binwalk, readelf |
-| **Pwn** | pwntools, ROPgadget, angr, unicorn, capstone |
-| **Crypto** | SageMath, z3, gmpy2, pycryptodome |
-| **Forensics** | volatility3, Sleuthkit, foremost, exiftool |
-| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract |
-| **Web** | curl, nmap, sqlmap, ffuf, gobuster |
-| **Mobile** | jadx, apktool, smali/baksmali, frida-tools |
+```bash
+ctf-install apt radare2 sqlmap nmap      # Debian packages
+ctf-install pip angr volatility3 z3-solver
+ctf-install gem zsteg                     # also: cargo / go / npm
+ctf-tools                                 # list what's available
+```
+
+Pass `--image <tag>` to use a different image for every challenge.
 
 ## Operator Messaging
 

@@ -17,9 +17,8 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import context_window, model_id_from_spec, supports_vision, validate_model_spec
-from backend.profiles import image_for_profile, suggest_profile
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
-from backend.sandbox import DockerSandbox
+from backend.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -308,13 +307,11 @@ class OpenAISolver:
         validate_model_spec(self.model_spec)
         self.model_id = model_id_from_spec(self.model_spec)
         self.cancel_event = self.cancel_event or asyncio.Event()
-        profile = suggest_profile(self.meta.category)
-        default_image = image_for_profile(profile)
-        # settings.sandbox_image=None → use the per-category profile image.
-        # When the user passes --image, that override wins for every challenge.
+        # One image for every challenge; agents install domain tools at runtime
+        # via `ctf-install`. `--image` overrides it for all challenges.
         override = getattr(self.settings, "sandbox_image", None)
         self.sandbox = DockerSandbox(
-            image=override or default_image,
+            image=override or DEFAULT_SANDBOX_IMAGE,
             challenge_dir=self.challenge_dir,
             memory_limit=getattr(self.settings, "container_memory_limit", "4g"),
         )

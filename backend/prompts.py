@@ -165,22 +165,18 @@ def build_prompt(
             lines.append(f"- {h['content']}")
         lines.append("")
 
-    # pyghidra is always installed in the sandbox — show for RE/pwn/misc categories
-    # or when distfiles contain binaries (non-text files)
+    # Binary-heavy categories: point at the runtime installer for RE tooling.
     cat_lower = (meta.category or "").lower()
     if cat_lower in ("reverse", "reversing", "re", "pwn", "binary", "misc", ""):
         lines += [
             "## Binary Analysis",
             "Your CWD is `/challenge/workspace/` — all challenge files are here with execute permissions.",
-            "**pyghidra** is installed for decompilation. Use it via bash:",
-            "```python",
-            "import pyghidra",
-            "with pyghidra.open_program('/challenge/workspace/binary') as flat_api:",
-            "    listing = flat_api.currentProgram.getListing()",
-            "    # Iterate functions, decompile, etc.",
+            "`gdb`, `gcc`, `objdump`/`readelf` (binutils) and `pwntools` are ready.",
+            "Install any other RE tooling on demand, e.g.:",
+            "```bash",
+            "ctf-install apt radare2 binwalk        # disassembler / carving",
+            "ctf-install pip angr capstone ropgadget pwntools  # python tooling",
             "```",
-            "Also available: radare2 (`r2`), gdb, angr, capstone, pwndbg.",
-            "You can install Python packages: `pip install pwntools z3-solver` etc.",
             "",
         ]
 
@@ -200,8 +196,10 @@ def build_prompt(
         "- `/challenge/distfiles/` — read-only originals (reference only).",
         "- `/tmp/` — writable, good for large intermediate files.",
         "- You are **root** with full internet access.",
-        "- Package managers: `pip install`, `apt-get install`, `npm install`, `go install`.",
-        "- Compilers: `gcc`/`g++`, `go`, `node`, `python3`. Install others as needed (`apt-get install -y cargo`).",
+        "- Baked in: `python3`/`pip`, `node`/`npm`, `go`, `gcc`/`g++`, `gdb`, `git`, `curl` + `pwntools`/`pycryptodome`.",
+        "- **Everything else: install on demand** via `ctf-install` (cached for the run):",
+        "  `ctf-install apt <pkg>` · `ctf-install pip <pkg>` · `ctf-install gem|cargo|go|npm <pkg>`.",
+        "  Plain `pip install` / `apt-get install` also work. Run `ctf-tools` to list what's available.",
     ]
 
     # Knowledge base — only if mounted

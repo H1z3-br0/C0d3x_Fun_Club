@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
 
+# Single image ("one mold") spawned for every solver container. Domain tools are
+# installed at runtime by the agent via the `ctf-install` helper.
+DEFAULT_SANDBOX_IMAGE = "ctf-swarm:base"
+
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
 _active_count: int = 0
@@ -159,12 +163,13 @@ class DockerSandbox:
             try:
                 self._container = await self._docker.containers.create(config)
             except aiodocker.exceptions.DockerError as e:
-                if getattr(e, "status", None) == 404 and self.image != "ctf-swarm:base":
+                if getattr(e, "status", None) == 404 and self.image != DEFAULT_SANDBOX_IMAGE:
                     logger.warning(
-                        "Image %s not found, falling back to ctf-swarm:base",
+                        "Image %s not found, falling back to %s",
                         self.image,
+                        DEFAULT_SANDBOX_IMAGE,
                     )
-                    self.image = "ctf-swarm:base"
+                    self.image = DEFAULT_SANDBOX_IMAGE
                     config["Image"] = self.image
                     self._container = await self._docker.containers.create(config)
                 else:
