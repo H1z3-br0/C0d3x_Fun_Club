@@ -72,10 +72,7 @@ def cli() -> None:
 @click.option(
     "--image",
     default=None,
-    help=(
-        "Sandbox image override. Default: picked per-challenge via "
-        "backend/profiles.py:suggest_profile (e.g. ctf-swarm:crypto)."
-    ),
+    help="Sandbox image override for every challenge. Default: ctf-swarm:base.",
 )
 @click.option("--models", multiple=True, help="Model specs (default: all configured)")
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
@@ -122,7 +119,7 @@ def main(
     console.print(f"  CTFd: {settings.ctfd_url}")
     console.print(f"  Proxy: {settings.openai_base_url}")
     console.print(f"  Models: {', '.join(model_specs)}")
-    console.print(f"  Image: {settings.sandbox_image or 'per-challenge profile'}")
+    console.print(f"  Image: {settings.sandbox_image or 'ctf-swarm:base'}")
     console.print(f"  Max challenges: {max_challenges}")
     console.print()
 

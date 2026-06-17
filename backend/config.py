@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     cliproxy_api_key: str = ""
 
     # Infra
-    # sandbox_image=None → solver picks a profile image per challenge category
-    # (see backend/profiles.py:suggest_profile). Set via --image to force one.
+    # sandbox_image=None → use the single default image (backend.sandbox.
+    # DEFAULT_SANDBOX_IMAGE). Set via --image to override it for every challenge.
     sandbox_image: str | None = None
     max_concurrent_challenges: int = 10
     max_attempts_per_challenge: int = 3
