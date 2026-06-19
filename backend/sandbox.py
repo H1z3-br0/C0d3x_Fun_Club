@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
 
+# Single image ("one mold") spawned for every challenge container. Domain tools
+# are installed at runtime by the agent — there are no per-category images.
+DEFAULT_SANDBOX_IMAGE = "ctf-swarm:base"
+
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
 _active_count: int = 0
@@ -77,11 +81,12 @@ class ExecResult:
 
 @dataclass
 class DockerSandbox:
-    """Isolated Docker container for a single solver agent."""
+    """One Docker container per challenge, shared by that challenge's agents."""
 
     image: str
     challenge_dir: str
     memory_limit: str = "16g"
+    challenge_name: str = ""
     workspace_dir: str = ""
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
@@ -90,6 +95,14 @@ class DockerSandbox:
     _restart_count: int = field(default=0, repr=False)
 
     MAX_RESTARTS = 3
+
+    def _labels(self) -> dict[str, str]:
+        labels = {CONTAINER_LABEL: "true"}
+        if self.challenge_name:
+            # Lets `docker ps --filter label=ctf-agent` show which task a
+            # container belongs to (one container per challenge).
+            labels["ctf-challenge"] = self.challenge_name
+        return labels
 
     @property
     def container_id(self) -> str:
@@ -144,7 +157,7 @@ class DockerSandbox:
                 "Cmd": ["sleep", "infinity"],
                 "WorkingDir": "/challenge/workspace",
                 "Tty": False,
-                "Labels": {CONTAINER_LABEL: "true"},
+                "Labels": self._labels(),
                 "HostConfig": {
                     "Binds": binds,
                     "ExtraHosts": ["host.docker.internal:host-gateway"],
@@ -159,12 +172,13 @@ class DockerSandbox:
             try:
                 self._container = await self._docker.containers.create(config)
             except aiodocker.exceptions.DockerError as e:
-                if getattr(e, "status", None) == 404 and self.image != "ctf-swarm:base":
+                if getattr(e, "status", None) == 404 and self.image != DEFAULT_SANDBOX_IMAGE:
                     logger.warning(
-                        "Image %s not found, falling back to ctf-swarm:base",
+                        "Image %s not found, falling back to %s",
                         self.image,
+                        DEFAULT_SANDBOX_IMAGE,
                     )
-                    self.image = "ctf-swarm:base"
+                    self.image = DEFAULT_SANDBOX_IMAGE
                     config["Image"] = self.image
                     self._container = await self._docker.containers.create(config)
                 else:
@@ -205,7 +219,7 @@ class DockerSandbox:
             "Cmd": ["sleep", "infinity"],
             "WorkingDir": "/challenge/workspace",
             "Tty": False,
-            "Labels": {CONTAINER_LABEL: "true"},
+            "Labels": self._labels(),
             "HostConfig": {
                 "Binds": self._binds,
                 "ExtraHosts": ["host.docker.internal:host-gateway"],
@@ -222,6 +236,24 @@ class DockerSandbox:
         info = await self._container.show()
         logger.info("Container restarted: %s (restart #%d)", info["Id"][:12], self._restart_count)
 
+    async def _ensure_restarted(self) -> None:
+        """Restart the container at most once across concurrent callers.
+
+        When several agents share this container and it dies, each in-flight
+        operation hits a "gone" error simultaneously. The lock serializes them;
+        the liveness check means only the first actually restarts — the rest see
+        a healthy container and return.
+        """
+        async with self._lock:
+            if self._container is not None:
+                try:
+                    info = await self._container.show()
+                    if info.get("State", {}).get("Running"):
+                        return
+                except Exception:
+                    pass  # treat as gone — fall through to restart
+            await self._restart_container()
+
     def _is_gone_error(self, e: Exception) -> bool:
         msg = str(e).lower()
         return "404" in msg or "no such container" in msg or "not found" in msg
@@ -230,24 +262,26 @@ class DockerSandbox:
         if not self._container:
             raise RuntimeError("Sandbox not started")
 
-        async with self._lock:
+        # No global lock here: this container is shared by all agents racing on
+        # the challenge, and docker exec calls are independent — they run in
+        # parallel. The lock is only taken to serialize container restarts.
+        try:
+            return await self._exec_inner(command, timeout_s)
+        except aiodocker.exceptions.DockerError as e:
+            if not self._is_gone_error(e):
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
             try:
-                return await self._exec_inner(command, timeout_s)
-            except aiodocker.exceptions.DockerError as e:
-                if not self._is_gone_error(e):
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
-                try:
-                    await self._restart_container()
-                    note = (
-                        "NOTE: The sandbox container was automatically restarted. "
-                        "/challenge/distfiles and /challenge/workspace are preserved. "
-                        "Any files you created in /tmp are lost — recreate them if needed."
-                    )
-                    result = await self._exec_inner(command, timeout_s)
-                    result.stderr = (note + "\n" + result.stderr).strip()
-                    return result
-                except Exception as restart_err:
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
+                await self._ensure_restarted()
+                note = (
+                    "NOTE: The sandbox container was automatically restarted. "
+                    "/challenge/distfiles and /challenge/workspace are preserved. "
+                    "Any files you created in /tmp are lost — recreate them if needed."
+                )
+                result = await self._exec_inner(command, timeout_s)
+                result.stderr = (note + "\n" + result.stderr).strip()
+                return result
+            except Exception as restart_err:
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
 
     async def _exec_inner(self, command: str, timeout_s: int) -> ExecResult:
         # Wrap command with `timeout` so the container kills the process on expiry.
@@ -310,7 +344,7 @@ class DockerSandbox:
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._ensure_restarted()
                     tar = await asyncio.wait_for(self._container.get_archive(path), timeout=30)
                 except Exception as restart_err:
                     raise RuntimeError(f"Container gone and restart failed: {restart_err}") from e
@@ -362,7 +396,7 @@ class DockerSandbox:
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._ensure_restarted()
                     await asyncio.wait_for(
                         self._container.put_archive(str(Path(path).parent), buf.getvalue()),
                         timeout=30,

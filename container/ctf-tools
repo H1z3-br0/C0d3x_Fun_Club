@@ -19,16 +19,11 @@ Read-only input path:
   /workspace/task
 EOF
 
-printf 'Current profile: %s\n' "${CTF_PROFILE:-unknown}"
-printf 'Shared tool-cache: %s\n' "${CTF_TOOL_CACHE:-/workspace/tool-cache}"
-printf '\nPreinstalled highlights:\n'
+printf 'Tool-cache: %s\n' "${CTF_TOOL_CACHE:-/workspace/tool-cache}"
+printf '\nBaked-in toolchain (everything else: ctf-install ...):\n'
 for tool in \
-  python pip git curl wget jq file xxd whois \
-  gdb gdb-multiarch strace radare2 r2 patchelf \
-  binwalk foremost yara steghide sqlmap hydra nmap socat tcpdump tshark \
-  ffuf gobuster dirb wfuzz smbclient redis-cli psql mysql telnet ftp \
-  ffmpeg tesseract qpdf exiftool tmux ruby gem cargo go npm dotnet jadx apktool adb \
-  sudo ssh sshpass getcap capsh getfacl getfattr nsenter unshare; do
+  python pip node npm go gcc g++ gdb \
+  git curl wget file xxd unzip; do
   if command -v "${tool}" >/dev/null 2>&1; then
     printf '  - %s -> %s\n' "${tool}" "$(command -v "${tool}")"
   fi

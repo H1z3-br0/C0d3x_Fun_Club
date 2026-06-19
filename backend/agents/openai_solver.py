@@ -17,9 +17,8 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import context_window, model_id_from_spec, supports_vision, validate_model_spec
-from backend.profiles import image_for_profile, suggest_profile
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
-from backend.sandbox import DockerSandbox
+from backend.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -298,6 +297,9 @@ class OpenAISolver:
     ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: object
+    # Shared per-challenge sandbox, owned and lifecycle-managed by the swarm.
+    # All solver agents racing on this challenge exec into the same container.
+    sandbox: DockerSandbox = None  # type: ignore[assignment]
     cancel_event: asyncio.Event | None = None
     no_submit: bool = False
     submit_fn: Any | None = None
@@ -308,13 +310,11 @@ class OpenAISolver:
         validate_model_spec(self.model_spec)
         self.model_id = model_id_from_spec(self.model_spec)
         self.cancel_event = self.cancel_event or asyncio.Event()
-        profile = suggest_profile(self.meta.category)
-        default_image = image_for_profile(profile)
-        # settings.sandbox_image=None → use the per-category profile image.
-        # When the user passes --image, that override wins for every challenge.
+        # One image for every challenge; agents install domain tools at runtime
+        # via `ctf-install`. `--image` overrides it for all challenges.
         override = getattr(self.settings, "sandbox_image", None)
         self.sandbox = DockerSandbox(
-            image=override or default_image,
+            image=override or DEFAULT_SANDBOX_IMAGE,
             challenge_dir=self.challenge_dir,
             memory_limit=getattr(self.settings, "container_memory_limit", "4g"),
         )
@@ -668,7 +668,7 @@ class OpenAISolver:
         logger.info("[%s] Context reset with handoff (%d chars)", self.agent_name, len(summary))
 
     async def stop(self) -> None:
+        # The sandbox is shared across all agents on this challenge and is owned
+        # by the swarm — do NOT stop it here, just close this agent's tracer.
         self.tracer.event("stop", step_count=self._step_count)
         self.tracer.close()
-        if self.sandbox:
-            await self.sandbox.stop()

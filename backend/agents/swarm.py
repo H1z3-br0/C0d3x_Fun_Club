@@ -17,6 +17,7 @@ from backend.memory import MemoryStore
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS, validate_model_specs
 from backend.prompts import ChallengeMeta
+from backend.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
@@ -89,6 +90,9 @@ class ChallengeSwarm:
     memory_store: MemoryStore | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # One Docker container per challenge, picked by category, shared by all the
+    # solver agents racing on this challenge. Built and torn down in run().
+    sandbox: DockerSandbox | None = None
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
@@ -100,6 +104,23 @@ class ChallengeSwarm:
 
     def __post_init__(self) -> None:
         self.model_specs = validate_model_specs(self.model_specs)
+
+
+    def _build_sandbox(self) -> DockerSandbox:
+        """Build the one container for this challenge.
+
+        A single base image is used for every challenge; agents install any
+        domain tools they need at runtime. ``settings.sandbox_image`` (set via
+        ``--image``) overrides the image for every challenge.
+        """
+        override = getattr(self.settings, "sandbox_image", None)
+        image = override or DEFAULT_SANDBOX_IMAGE
+        return DockerSandbox(
+            image=image,
+            challenge_dir=self.challenge_dir,
+            challenge_name=self.meta.name,
+            memory_limit=getattr(self.settings, "container_memory_limit", "16g"),
+        )
 
     def _create_solver(self, model_spec: str):
         """Create the right solver type based on provider.
@@ -117,6 +138,7 @@ class ChallengeSwarm:
             ctfd=self.ctfd,
             cost_tracker=self.cost_tracker,
             settings=self.settings,
+            sandbox=self.sandbox,
             cancel_event=self.cancel_event,
             no_submit=self.no_submit,
             submit_fn=_submit_fn,
@@ -310,6 +332,27 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
+        """Start the shared container, race all solvers, then tear it down."""
+        self.sandbox = self._build_sandbox()
+        try:
+            await self.sandbox.start()
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to start challenge container (%s): %s",
+                self.meta.name, self.sandbox.image, e, exc_info=True,
+            )
+            await self.sandbox.stop()
+            self.sandbox = None
+            return None
+
+        try:
+            return await self._race_solvers()
+        finally:
+            if self.sandbox:
+                await self.sandbox.stop()
+                self.sandbox = None
+
+    async def _race_solvers(self) -> SolverResult | None:
         """Run all solvers in parallel. Returns the winner's result or None."""
         tasks = [
             asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")

@@ -72,10 +72,7 @@ def cli() -> None:
 @click.option(
     "--image",
     default=None,
-    help=(
-        "Sandbox image override. Default: picked per-challenge via "
-        "backend/profiles.py:suggest_profile (e.g. ctf-swarm:crypto)."
-    ),
+    help="Sandbox image override for every challenge. Default: ctf-swarm:base.",
 )
 @click.option(
     "--models",
@@ -135,7 +132,7 @@ def main(
     console.print(f"  CTFd: {settings.ctfd_url}")
     console.print(f"  Proxy: {settings.openai_base_url}")
     console.print(f"  Models: {', '.join(model_specs)}")
-    console.print(f"  Image: {settings.sandbox_image or 'per-challenge profile'}")
+    console.print(f"  Image: {settings.sandbox_image or 'ctf-swarm:base'}")
     console.print(f"  Max challenges: {max_challenges}")
     console.print()
 
@@ -159,7 +156,9 @@ async def _run_single(
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    max_containers = max_challenges * len(model_specs)
+    # One shared container per challenge (agents of a swarm share it), so the
+    # concurrent-start cap tracks challenges, not challenges × models.
+    max_containers = max(1, max_challenges)
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
 
@@ -218,7 +217,9 @@ async def _run_coordinator(
     """Run the full coordinator (continuous until Ctrl+C)."""
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    max_containers = max_challenges * len(model_specs)
+    # One shared container per challenge (agents of a swarm share it), so the
+    # concurrent-start cap tracks challenges, not challenges × models.
+    max_containers = max(1, max_challenges)
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
     console.print("[bold]Starting coordinator (Ctrl+C to stop)...[/bold]\n")
