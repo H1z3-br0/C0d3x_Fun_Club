@@ -156,7 +156,9 @@ async def _run_single(
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    max_containers = max_challenges * len(model_specs)
+    # One shared container per challenge (agents of a swarm share it), so the
+    # concurrent-start cap tracks challenges, not challenges × models.
+    max_containers = max(1, max_challenges)
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
 
@@ -215,7 +217,9 @@ async def _run_coordinator(
     """Run the full coordinator (continuous until Ctrl+C)."""
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    max_containers = max_challenges * len(model_specs)
+    # One shared container per challenge (agents of a swarm share it), so the
+    # concurrent-start cap tracks challenges, not challenges × models.
+    max_containers = max(1, max_challenges)
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
     console.print("[bold]Starting coordinator (Ctrl+C to stop)...[/bold]\n")

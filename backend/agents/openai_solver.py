@@ -297,6 +297,9 @@ class OpenAISolver:
     ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: object
+    # Shared per-challenge sandbox, owned and lifecycle-managed by the swarm.
+    # All solver agents racing on this challenge exec into the same container.
+    sandbox: DockerSandbox = None  # type: ignore[assignment]
     cancel_event: asyncio.Event | None = None
     no_submit: bool = False
     submit_fn: Any | None = None
@@ -665,7 +668,7 @@ class OpenAISolver:
         logger.info("[%s] Context reset with handoff (%d chars)", self.agent_name, len(summary))
 
     async def stop(self) -> None:
+        # The sandbox is shared across all agents on this challenge and is owned
+        # by the swarm — do NOT stop it here, just close this agent's tracer.
         self.tracer.event("stop", step_count=self._step_count)
         self.tracer.close()
-        if self.sandbox:
-            await self.sandbox.stop()

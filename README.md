@@ -45,10 +45,10 @@ individual challenges. The coordinator and solvers are locked to GPT-5.5.
          +-----------+      +-----------+      +-----------+
 ```
 
-Each solver runs in an isolated Docker container spawned from a single minimal
-image. The image ships only the base toolchain (python/pip, node/npm, go, gcc,
-gdb); each solver installs the domain tools it needs at runtime via the
-`ctf-install` helper. Solvers never give up — they keep trying different
+Each challenge runs in its own Docker container, spawned from a single base
+image; the agent installs whatever domain tools it needs at runtime. All
+solver agents racing on that challenge share the one container and its
+`/challenge/workspace`. Solvers never give up — they keep trying different
 approaches until the flag is found or the coordinator kills the swarm.
 
 ## Prerequisites
@@ -71,8 +71,8 @@ The agent does **not** call upstream LLM APIs directly. It always goes through
 # 2. Install this project
 uv sync
 
-# 3. Build the sandbox image (one image, used for every solver container)
-./build_profiles.sh  # builds ctf-swarm:base from Dockerfile
+# 3. Build the single sandbox image
+./build_profiles.sh  # builds ctf-swarm:base (the one image used for every task)
 
 # 4. Configure
 cp .env.example .env
@@ -102,25 +102,19 @@ prefix is informational - the proxy routes by model alias. Passing any model
 other than `gpt-5.5` through `--models` or `--coordinator-model` fails at
 startup.
 
-## Sandbox image
+## Sandbox
 
-There is **one image** ([Dockerfile](Dockerfile), `ctf-swarm:base`) for every
-solver container. It contains only the package managers and core toolchain —
-`python3`/`pip`, `node`/`npm`, `go`, `apt`, plus `build-essential`, `gdb`,
-`binutils`, `git`, `curl` and the `pwntools`/`pycryptodome` Python core.
+There is **one image for every challenge** — `ctf-swarm:base` (override with
+`--image`). It ships only the package managers and core toolchain (python/pip,
+node/npm, go, apt, build-essential, gdb, binutils, git, curl) plus a tiny CTF
+core (pwntools, pycryptodome, python-magic). Anything domain-specific
+(radare2, sagemath, volatility, jadx, …) the agent **installs at runtime**
+inside its container.
 
-Everything domain-specific is installed at runtime by the agent via the
-[`ctf-install`](container/ctf-install) helper, which caches into a shared
-tool-cache for the run:
-
-```bash
-ctf-install apt radare2 sqlmap nmap      # Debian packages
-ctf-install pip angr volatility3 z3-solver
-ctf-install gem zsteg                     # also: cargo / go / npm
-ctf-tools                                 # list what's available
-```
-
-Pass `--image <tag>` to use a different image for every challenge.
+Each challenge gets its own container (labelled `ctf-challenge=<name>`), and
+all solver agents racing on that challenge share it and its
+`/challenge/workspace`. Containers are created per task from the one image and
+destroyed when the task finishes — only the image is built ahead of time.
 
 ## Operator Messaging
 
@@ -139,7 +133,7 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 - Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
 - Coordinator LLM reads per-solver traces and crafts targeted bumps
 - Cross-solver insights shared through a message bus with per-model cursors
-- Docker sandboxes isolated per solver
+- One Docker sandbox per challenge, shared by its solver agents (tools installed at runtime)
 - Deduplicated flag submission with per-submitter escalating cooldown
 - Graceful proxy health-check on startup (fail fast if cli-proxy-api is down)
 - Persistent memory of past solves via LanceDB (hash-bag-of-words embedding)
