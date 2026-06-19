@@ -9,42 +9,53 @@ By default (`force-model-prefix: false`) the prefix is stripped at call time via
 
 from __future__ import annotations
 
-# Default model specs — one entry per unique solver.
-# These names must match an alias exposed by cli-proxy-api's config.yaml.
-DEFAULT_MODELS: list[str] = [
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/gpt-5.3-codex",
-]
+ONLY_MODEL_ID = "gpt-5.5"
+ONLY_MODEL_SPEC = f"codex/{ONLY_MODEL_ID}"
+
+# Default model specs - one entry per unique solver.
+# This project is intentionally locked to GPT-5.5 only.
+DEFAULT_MODELS: list[str] = [ONLY_MODEL_SPEC]
 
 # Context window sizes (tokens)
 CONTEXT_WINDOWS: dict[str, int] = {
-    "gpt-5.4": 1_000_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.3-codex": 1_000_000,
-    "gpt-5.3-codex-spark": 128_000,
-    "claude-opus-4-6": 200_000,
-    "claude-sonnet-4-6": 200_000,
+    ONLY_MODEL_ID: 1_000_000,
 }
 
 # Models that support vision
-VISION_MODELS: set[str] = {
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-}
+VISION_MODELS: set[str] = {ONLY_MODEL_ID}
 
 
 def model_id_from_spec(spec: str) -> str:
-    """Extract just the model ID from a spec (strips effort suffix)."""
-    parts = spec.split("/")
-    return parts[1] if len(parts) >= 2 else spec
+    """Extract just the model ID from a spec."""
+    spec = spec.strip()
+    parts = spec.split("/", 1)
+    return parts[1] if len(parts) == 2 else spec
 
 
 def provider_from_spec(spec: str) -> str:
     """Extract the provider from a spec."""
     return spec.split("/", 1)[0]
+
+
+def is_allowed_model(spec: str) -> bool:
+    """Return True only for the single supported model."""
+    return model_id_from_spec(spec) == ONLY_MODEL_ID
+
+
+def validate_model_spec(spec: str) -> str:
+    """Validate a single model spec and return it unchanged."""
+    if not is_allowed_model(spec):
+        raise ValueError(f"Unsupported model '{spec}'. Only {ONLY_MODEL_ID} is allowed.")
+    return spec
+
+
+def validate_model_specs(specs: list[str]) -> list[str]:
+    """Validate solver model specs."""
+    if not specs:
+        return list(DEFAULT_MODELS)
+    for spec in specs:
+        validate_model_spec(spec)
+    return specs
 
 
 def supports_vision(spec: str) -> bool:

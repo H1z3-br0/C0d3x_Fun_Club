@@ -15,7 +15,7 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.memory import MemoryStore
 from backend.message_bus import ChallengeMessageBus
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, validate_model_specs
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -97,6 +97,10 @@ class ChallengeSwarm:
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+
+    def __post_init__(self) -> None:
+        self.model_specs = validate_model_specs(self.model_specs)
+
     def _create_solver(self, model_spec: str):
         """Create the right solver type based on provider.
 

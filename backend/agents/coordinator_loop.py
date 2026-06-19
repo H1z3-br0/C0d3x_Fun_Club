@@ -14,7 +14,7 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.deps import CoordinatorDeps
 from backend.memory import MemoryStore
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, validate_model_specs
 from backend.poller import CTFdPoller
 from backend.prompts import ChallengeMeta
 
@@ -40,7 +40,7 @@ def build_deps(
         password=settings.ctfd_pass,
     )
     cost_tracker = CostTracker()
-    specs = model_specs or list(DEFAULT_MODELS)
+    specs = validate_model_specs(model_specs or list(DEFAULT_MODELS))
     Path(challenges_root).mkdir(parents=True, exist_ok=True)
     memory_root = Path(getattr(settings, "memory_dir", "findings/memory"))
     memory_store = MemoryStore(memory_root)

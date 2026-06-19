@@ -35,29 +35,9 @@ PROVIDER_MAP: dict[str, str] = {
     "codex": "openai",
 }
 
-# Fallback pricing for models not in genai-prices (per 1M tokens, USD)
-FALLBACK_PRICING: dict[str, dict[str, float]] = {
-    "gpt-5.4-mini": {
-        "input": 0.75,
-        "cached_input": 0.075,
-        "output": 4.50,
-    },
-    "gpt-5.4": {
-        "input": 2.50,
-        "cached_input": 0.25,
-        "output": 15.00,
-    },
-    "gpt-5.3-codex": {
-        "input": 1.75,
-        "cached_input": 0.175,
-        "output": 14.00,
-    },
-    "gpt-5.3-codex-spark": {
-        "input": 0.50,
-        "cached_input": 0.05,
-        "output": 2.00,
-    },
-}
+# Fallback pricing for models not in genai-prices (per 1M tokens, USD).
+# Keep empty unless GPT-5.5 pricing is not available from genai-prices.
+FALLBACK_PRICING: dict[str, dict[str, float]] = {}
 
 
 def _calc_fallback_cost(usage: RunUsage, model: str) -> float | None:

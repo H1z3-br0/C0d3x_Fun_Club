@@ -14,7 +14,7 @@ import click
 from rich.console import Console
 
 from backend.config import Settings
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, ONLY_MODEL_ID, validate_model_spec, validate_model_specs
 
 console = Console()
 
@@ -63,7 +63,7 @@ def _check_proxy_reachable(settings: Settings) -> None:
 
 @click.group()
 def cli() -> None:
-    """CTF Agent — multi-model solver swarm via cli-proxy-api."""
+    """CTF Agent via cli-proxy-api."""
 
 
 @cli.command("run")
@@ -77,12 +77,20 @@ def cli() -> None:
         "backend/profiles.py:suggest_profile (e.g. ctf-swarm:crypto)."
     ),
 )
-@click.option("--models", multiple=True, help="Model specs (default: all configured)")
+@click.option(
+    "--models",
+    multiple=True,
+    help=f"Solver model specs. Only {ONLY_MODEL_ID} is allowed.",
+)
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: gpt-5.4)")
-@click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
+@click.option(
+    "--coordinator-model",
+    default=None,
+    help=f"Model for coordinator. Only {ONLY_MODEL_ID} is allowed.",
+)
+@click.option("--max-challenges", default=3, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto-pick)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
@@ -98,7 +106,7 @@ def main(
     msg_port: int,
     verbose: bool,
 ) -> None:
-    """CTF Agent — multi-model solver swarm.
+    """CTF Agent.
 
     Run without --challenge to start the full coordinator (Ctrl+C to stop).
     All LLM traffic goes through the local cli-proxy-api instance (see .env.example).
@@ -114,9 +122,14 @@ def main(
         settings.ctfd_token = ctfd_token
     settings.max_concurrent_challenges = max_challenges
 
-    _check_proxy_reachable(settings)
+    try:
+        model_specs = validate_model_specs(list(models) if models else list(DEFAULT_MODELS))
+        if coordinator_model is not None:
+            validate_model_spec(coordinator_model)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
-    model_specs = list(models) if models else list(DEFAULT_MODELS)
+    _check_proxy_reachable(settings)
 
     console.print("[bold]CTF Agent v2[/bold]")
     console.print(f"  CTFd: {settings.ctfd_url}")

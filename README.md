@@ -1,15 +1,14 @@
 # CTF Agent
 
-Autonomous CTF (Capture The Flag) solver that races multiple AI models against
-challenges in parallel. All LLM traffic is routed through a local
+Autonomous CTF (Capture The Flag) solver that runs GPT-5.5 against challenges
+in parallel. All LLM traffic is routed through a local
 [CLIProxyAPI](https://github.com/router-for-me/cli-proxy-api) instance, which
 fans out to Codex / Claude / Gemini via OAuth-backed accounts.
 
 ## How It Works
 
 A **coordinator** LLM manages the competition while **solver swarms** attack
-individual challenges. Each swarm runs multiple models simultaneously — the
-first to find the flag wins.
+individual challenges. The coordinator and solvers are locked to GPT-5.5.
 
 ```
                         +-----------------+
@@ -90,20 +89,19 @@ uv run ctf-solve run \
   -v
 ```
 
-## Solver Models
+## Solver Model
 
-The `DEFAULT_MODELS` list in [backend/models.py](backend/models.py) specifies
-which model aliases to spawn per challenge:
+The project is intentionally locked to GPT-5.5. The `DEFAULT_MODELS` list in
+[backend/models.py](backend/models.py) contains the only solver alias:
 
 | Spec | Notes |
 |------|-------|
-| `codex/gpt-5.4` | Best overall solver |
-| `codex/gpt-5.4-mini` | Fast, good for easy challenges |
-| `codex/gpt-5.3-codex` | Reasoning-heavy |
+| `codex/gpt-5.5` | Only supported solver model |
 
-These names must match aliases exposed by your `cliproxyapi/config.yaml`. The
-`codex/` prefix is informational — the proxy routes by model alias. Override
-with `--models codex/gpt-5.4 codex/gpt-5.4-mini`.
+This alias must be exposed by your `cliproxyapi/config.yaml`. The `codex/`
+prefix is informational - the proxy routes by model alias. Passing any model
+other than `gpt-5.5` through `--models` or `--coordinator-model` fails at
+startup.
 
 ## Sandbox Profiles
 
@@ -138,7 +136,7 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 
 ## Features
 
-- Multi-model racing on every challenge
+- GPT-5.5-only solving on every challenge
 - Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
 - Coordinator LLM reads per-solver traces and crafts targeted bumps
 - Cross-solver insights shared through a message bus with per-model cursors
@@ -158,7 +156,7 @@ OPENAI_BASE_URL=http://127.0.0.1:8317/v1
 OPENAI_API_KEY=sk-from-cliproxyapi-config-yaml
 ```
 
-`cliproxyapi/config.yaml` must expose the model aliases used in
+`cliproxyapi/config.yaml` must expose the `gpt-5.5` alias used by
 `DEFAULT_MODELS` (through `codex-api-key`, `openai-compatibility`, or OAuth
 accounts in `~/.cli-proxy-api/*.json`).
 

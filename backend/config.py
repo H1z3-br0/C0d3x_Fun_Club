@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # sandbox_image=None → solver picks a profile image per challenge category
     # (see backend/profiles.py:suggest_profile). Set via --image to force one.
     sandbox_image: str | None = None
-    max_concurrent_challenges: int = 10
+    max_concurrent_challenges: int = 3
     max_attempts_per_challenge: int = 3
     container_memory_limit: str = "16g"
     findings_dir: str = "findings"

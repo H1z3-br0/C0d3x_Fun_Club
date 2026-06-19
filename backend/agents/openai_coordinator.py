@@ -22,6 +22,7 @@ from backend.agents.coordinator_core import (
 from backend.agents.coordinator_loop import build_deps, run_event_loop
 from backend.config import Settings
 from backend.deps import CoordinatorDeps
+from backend.models import ONLY_MODEL_ID, model_id_from_spec, validate_model_spec
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ COORDINATOR_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-COORDINATOR_CONTEXT_WINDOW = 1_000_000  # gpt-5.4 / default coordinator model
+COORDINATOR_CONTEXT_WINDOW = 1_000_000  # gpt-5.5
 
 COMPACT_REQUEST = """\
 CONTEXT COMPACTION: Your conversation history is nearly full. Summarize the current competition state:
@@ -175,9 +176,10 @@ Be maximally concise. This summary replaces your full history — preserve every
 
 
 class OpenAICoordinator:
-    def __init__(self, deps: CoordinatorDeps, model: str = "gpt-5.4", settings: Settings | None = None) -> None:
+    def __init__(self, deps: CoordinatorDeps, model: str = ONLY_MODEL_ID, settings: Settings | None = None) -> None:
         self.deps = deps
-        self.model = model
+        validate_model_spec(model)
+        self.model = model_id_from_spec(model)
         self.settings = settings
         base_url = getattr(settings, "openai_base_url", "http://localhost:8080/v1") if settings else "http://localhost:8080/v1"
         api_key = getattr(settings, "cliproxy_api_key", "") if settings else ""
@@ -325,7 +327,7 @@ async def run_openai_coordinator(
     ctfd, cost_tracker, deps = build_deps(settings, model_specs, challenges_root, no_submit)
     deps.msg_port = msg_port
 
-    coordinator = OpenAICoordinator(deps, model=coordinator_model or "gpt-5.4", settings=settings)
+    coordinator = OpenAICoordinator(deps, model=coordinator_model or ONLY_MODEL_ID, settings=settings)
 
     async def turn_fn(msg: str) -> None:
         logger.debug(f"Coordinator query: {msg[:200]}")

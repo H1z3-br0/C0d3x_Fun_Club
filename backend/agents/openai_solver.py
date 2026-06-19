@@ -16,7 +16,7 @@ from backend.console import log_model_text, log_tool_call, log_tool_result, log_
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
-from backend.models import context_window, model_id_from_spec, supports_vision
+from backend.models import context_window, model_id_from_spec, supports_vision, validate_model_spec
 from backend.profiles import image_for_profile, suggest_profile
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
@@ -305,6 +305,7 @@ class OpenAISolver:
     notify_coordinator: Any | None = None
 
     def __post_init__(self) -> None:
+        validate_model_spec(self.model_spec)
         self.model_id = model_id_from_spec(self.model_spec)
         self.cancel_event = self.cancel_event or asyncio.Event()
         profile = suggest_profile(self.meta.category)
