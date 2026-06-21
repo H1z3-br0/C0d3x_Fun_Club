@@ -1,14 +1,16 @@
 # CTF Agent
 
-Autonomous CTF (Capture The Flag) solver that runs GPT-5.5 against challenges
-in parallel. All LLM traffic is routed through a local
+Autonomous CTF (Capture The Flag) solver that races GPT-5.5 and Claude Opus
+against challenges in parallel. All LLM traffic is routed through a local
 [CLIProxyAPI](https://github.com/router-for-me/cli-proxy-api) instance, which
 fans out to Codex / Claude / Gemini via OAuth-backed accounts.
 
 ## How It Works
 
 A **coordinator** LLM manages the competition while **solver swarms** attack
-individual challenges. The coordinator and solvers are locked to GPT-5.5.
+individual challenges. By default each swarm races three models — `gpt-5.5`,
+`claude-opus-4-8`, and `claude-opus-4-7` — and the first to confirm a flag wins.
+The coordinator runs on GPT-5.5.
 
 ```
                         +-----------------+
@@ -45,9 +47,11 @@ individual challenges. The coordinator and solvers are locked to GPT-5.5.
          +-----------+      +-----------+      +-----------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools pre-installed.
-Solvers never give up — they keep trying different approaches until the flag is
-found or the coordinator kills the swarm.
+Each challenge gets one Docker container (`ctf-swarm:base`) shared by all solver
+models in its swarm. Solvers are persistent — when stuck they get "bumped" with
+sibling insights and a fresh step budget and keep trying different approaches,
+until the flag is found, the coordinator kills the swarm, or a solver hits its
+safety limits (repeated hard errors or a context-window rotation cap).
 
 ## Prerequisites
 
@@ -63,24 +67,23 @@ The agent does **not** call upstream LLM APIs directly. It always goes through
 ## Quick Start
 
 ```bash
-# 1. Start cli-proxy-api (port 8317 by default)
-/home/dima/cliproxyapi/cli-proxy-api --config /home/dima/cliproxyapi/config.yaml
+# 1. Start cli-proxy-api (port 8317 by default). Copy the sample config and add
+#    your own api-key + OAuth accounts — config.yaml is gitignored.
+cp config.example.yaml config.yaml
+cli-proxy-api --config config.yaml
 
 # 2. Install this project
 uv sync
 
-# 3. Build the base sandbox image
-docker build -f sandbox/Dockerfile.sandbox -t ctf-swarm:base .
+# 3. Build the sandbox image (single image — ctf-swarm:base)
+./build_sandbox.sh
 
-# 4. (Optional) Build profile images for per-category sandboxes
-./build_profiles.sh  # builds ctf-swarm:web, ctf-swarm:crypto, etc.
-
-# 5. Configure
+# 4. Configure
 cp .env.example .env
-# Edit .env — set OPENAI_API_KEY to one of the keys from cliproxyapi/config.yaml
+# Edit .env — set CLIPROXY_API_KEY to one of the keys from cliproxyapi/config.yaml
 #             set CTFD_URL / CTFD_TOKEN
 
-# 6. Run against a CTFd instance
+# 5. Run against a CTFd instance
 uv run ctf-solve run \
   --ctfd-url https://ctf.example.com \
   --ctfd-token ctfd_your_token \
@@ -89,39 +92,43 @@ uv run ctf-solve run \
   -v
 ```
 
-## Solver Model
+> **Dry run (`--no-submit`):** flags are recorded but **not** submitted to CTFd.
+> A found flag is treated as "confirmed" only to stop the swarm — it does **not**
+> mean CTFd accepted it. Re-run without `--no-submit` for real verification.
 
-The project is intentionally locked to GPT-5.5. The `DEFAULT_MODELS` list in
-[backend/models.py](backend/models.py) contains the only solver alias:
+## Solver Models
 
-| Spec | Notes |
-|------|-------|
-| `codex/gpt-5.5` | Only supported solver model |
+The `DEFAULT_MODELS` list in [backend/models.py](backend/models.py) is the
+default solver hive — every challenge is raced by all three:
 
-This alias must be exposed by your `cliproxyapi/config.yaml`. The `codex/`
-prefix is informational - the proxy routes by model alias. Passing any model
-other than `gpt-5.5` through `--models` or `--coordinator-model` fails at
-startup.
+| Spec | Model id | Notes |
+|------|----------|-------|
+| `codex/gpt-5.5` | `gpt-5.5` | Routed via Codex OAuth |
+| `claude/claude-opus-4-8` | `claude-opus-4-8` | Routed via Claude OAuth |
+| `claude/claude-opus-4-7` | `claude-opus-4-7` | Routed via Claude OAuth |
 
-## Sandbox Profiles
+Each model id must be exposed as an alias by your `cliproxyapi/config.yaml`
+(Codex account for GPT-5.5, Claude account for the Opus models). The
+`provider/` prefix (`codex/`, `claude/`) is informational — the proxy routes by
+model alias. Pass `--models codex/gpt-5.5` to run a single model, or any subset.
+Any id outside the allow-list fails at startup. The coordinator defaults to
+`codex/gpt-5.5` (override with `--coordinator-model`).
 
-Per-category Docker images are defined in [Dockerfile](Dockerfile). If
-`--image` is not passed, each swarm picks a profile by challenge category
-(see [backend/profiles.py](backend/profiles.py:suggest_profile) — e.g.
-`crypto → ctf-swarm:crypto`, `web → ctf-swarm:web`). Pass `--image
-ctf-swarm:base` to force a single image for every challenge.
+## Sandbox
 
-Tooling per profile (non-exhaustive):
+The project uses a **single** Docker image, `ctf-swarm:base`, built from the
+root [Dockerfile](Dockerfile) via `./build_sandbox.sh`.
 
-| Category | Tools |
-|----------|-------|
-| **Binary** | radare2, GDB, objdump, binwalk, readelf |
-| **Pwn** | pwntools, ROPgadget, angr, unicorn, capstone |
-| **Crypto** | SageMath, z3, gmpy2, pycryptodome |
-| **Forensics** | volatility3, Sleuthkit, foremost, exiftool |
-| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract |
-| **Web** | curl, nmap, sqlmap, ffuf, gobuster |
-| **Mobile** | jadx, apktool, smali/baksmali, frida-tools |
+- **Each challenge gets exactly one container**, shared by all solver models in
+  the swarm. Challenge files are copied into `/challenge/workspace` (read-write);
+  read-only originals stay at `/challenge/distfiles`.
+- **Baked in:** `python3`/`pip`, `node`/`npm`, `go`, `gcc`/`g++`, `gdb`, `git`,
+  `curl`, `file`, `xxd`, plus Python `pwntools`, `pycryptodome`, `python-magic`.
+- **Everything heavier installs on demand** from inside the container via
+  `ctf-install` (e.g. `ctf-install apt radare2 binwalk`,
+  `ctf-install pip angr z3-solver`) — no need to build or maintain many images.
+
+Override the image with `--image <name>` if you really need a different one.
 
 ## Operator Messaging
 
@@ -136,14 +143,15 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 
 ## Features
 
-- GPT-5.5-only solving on every challenge
+- Multi-model hive (GPT-5.5 + Claude Opus 4.8/4.7) racing every challenge
 - Auto-spawn for newly appearing challenges, auto-kill on confirmed solve
 - Coordinator LLM reads per-solver traces and crafts targeted bumps
 - Cross-solver insights shared through a message bus with per-model cursors
-- Docker sandboxes isolated per solver
+- One shared Docker sandbox per challenge (single `ctf-swarm:base` image)
 - Deduplicated flag submission with per-submitter escalating cooldown
 - Graceful proxy health-check on startup (fail fast if cli-proxy-api is down)
-- Persistent memory of past solves via LanceDB (hash-bag-of-words embedding)
+- Persistent memory of past solves via LanceDB (hash-bag-of-words keyword
+  similarity — token overlap, not a semantic embedding)
 
 ## Configuration cheatsheet
 
@@ -153,12 +161,13 @@ startup, so `msg` discovers it automatically. Override with `--port` if needed.
 CTFD_URL=https://ctf.example.com
 CTFD_TOKEN=ctfd_your_token
 OPENAI_BASE_URL=http://127.0.0.1:8317/v1
-OPENAI_API_KEY=sk-from-cliproxyapi-config-yaml
+CLIPROXY_API_KEY=sk-from-cliproxyapi-config-yaml  # OPENAI_API_KEY still accepted as a legacy alias
 ```
 
-`cliproxyapi/config.yaml` must expose the `gpt-5.5` alias used by
-`DEFAULT_MODELS` (through `codex-api-key`, `openai-compatibility`, or OAuth
-accounts in `~/.cli-proxy-api/*.json`).
+`cliproxyapi/config.yaml` must expose every model id in `DEFAULT_MODELS`
+(`gpt-5.5`, `claude-opus-4-8`, `claude-opus-4-7`) as an alias — through
+`codex-api-key`, `openai-compatibility`, or OAuth accounts in
+`~/.cli-proxy-api/*.json`.
 
 ## Acknowledgements
 

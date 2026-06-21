@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
 
+# Single shared sandbox image. Heavy/specialised tooling is installed on demand
+# from inside the container via `ctf-install` rather than baked into per-category images.
+DEFAULT_SANDBOX_IMAGE = "ctf-swarm:base"
+
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
 _active_count: int = 0
@@ -47,21 +51,33 @@ async def _track_stop() -> None:
 
 
 async def cleanup_orphan_containers() -> None:
-    """Kill any leftover ctf-agent containers from a previous run."""
+    """Reap leftover ctf-agent containers that are NOT running.
+
+    Only stopped/exited/dead containers are removed — never a *running* one, so a
+    second instance of this project started while a first is live won't kill the
+    first's active containers. (A live swarm always stops its own container in
+    `finally`; a truly crashed run leaves a stopped/exited container that this reaps.)
+    """
     try:
         docker = aiodocker.Docker()
         try:
+            # status filter excludes "running" (and "paused", which we also leave alone).
             containers = await docker.containers.list(
                 all=True,
-                filters={"label": [CONTAINER_LABEL]},
+                filters={
+                    "label": [CONTAINER_LABEL],
+                    "status": ["created", "exited", "dead", "restarting", "removing"],
+                },
             )
+            removed = 0
             for c in containers:
                 try:
                     await c.delete(force=True)
+                    removed += 1
                 except Exception:
                     pass
-            if containers:
-                logger.info("Cleaned up %d orphan container(s)", len(containers))
+            if removed:
+                logger.info("Cleaned up %d stopped orphan container(s)", removed)
         finally:
             await docker.close()
     except Exception as e:
@@ -77,7 +93,13 @@ class ExecResult:
 
 @dataclass
 class DockerSandbox:
-    """Isolated Docker container for a single solver agent."""
+    """One Docker container, shared by every solver model working a challenge.
+
+    `exec`/`read_file`/`write_file` run concurrently — Docker handles multiple exec
+    sessions on one container fine. Only container restarts are serialised (via
+    `_restart_lock`) so a simultaneous "container gone" from several solvers doesn't
+    recreate it more than once.
+    """
 
     image: str
     challenge_dir: str
@@ -85,7 +107,7 @@ class DockerSandbox:
     workspace_dir: str = ""
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _restart_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _binds: list[str] = field(default_factory=list, repr=False)
     _restart_count: int = field(default=0, repr=False)
 
@@ -97,6 +119,25 @@ class DockerSandbox:
         if not self._container:
             raise RuntimeError("Sandbox not started")
         return self._container.id
+
+    def _container_config(self) -> dict[str, Any]:
+        """Docker create() config. Single source of truth for start() and restart."""
+        return {
+            "Image": self.image,
+            "Cmd": ["sleep", "infinity"],
+            "WorkingDir": "/challenge/workspace",
+            "Tty": False,
+            "Labels": {CONTAINER_LABEL: "true"},
+            "HostConfig": {
+                "Binds": self._binds,
+                "ExtraHosts": ["host.docker.internal:host-gateway"],
+                "CapAdd": ["SYS_ADMIN", "SYS_PTRACE"],
+                "SecurityOpt": ["seccomp=unconfined"],
+                "Devices": [{"PathOnHost": "/dev/loop-control", "PathInContainer": "/dev/loop-control", "CgroupPermissions": "rwm"}],
+                "Memory": self._parse_memory_limit(),
+                "NanoCpus": int(2 * 1e9),
+            },
+        }
 
     def _parse_memory_limit(self) -> int:
         s = self.memory_limit.strip().lower()
@@ -113,77 +154,72 @@ class DockerSandbox:
     async def start(self) -> None:
         sem = _start_semaphore or asyncio.Semaphore(50)
         async with sem:
-            self._docker = aiodocker.Docker()
-
-            self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
-
-            challenge_root = Path(self.challenge_dir).resolve()
-            distfiles = str(challenge_root / "distfiles")
-            meta_yml = str(challenge_root / "metadata.yml")
-
-            binds: list[str] = [f"{self.workspace_dir}:/challenge/workspace:rw"]
-            if Path(distfiles).exists():
-                binds.append(f"{distfiles}:/challenge/distfiles:ro")
-            else:
-                # No distfiles/ subdir — mount the challenge root directly as distfiles
-                binds.append(f"{str(challenge_root)}:/challenge/distfiles:ro")
-            if Path(meta_yml).exists():
-                binds.append(f"{meta_yml}:/challenge/metadata.yml:ro")
-
-            # Shared knowledge base (HackTricks, PayloadsAllTheThings, etc.)
-            knowledge_dir = Path(__file__).resolve().parents[1] / "knowledge"
-            if knowledge_dir.is_dir():
-                for repo_dir in sorted(knowledge_dir.iterdir()):
-                    if repo_dir.is_dir():
-                        binds.append(f"{repo_dir}:/knowledge/{repo_dir.name}:ro")
-
-            self._binds = binds
-
-            config = {
-                "Image": self.image,
-                "Cmd": ["sleep", "infinity"],
-                "WorkingDir": "/challenge/workspace",
-                "Tty": False,
-                "Labels": {CONTAINER_LABEL: "true"},
-                "HostConfig": {
-                    "Binds": binds,
-                    "ExtraHosts": ["host.docker.internal:host-gateway"],
-                    "CapAdd": ["SYS_ADMIN", "SYS_PTRACE"],
-                    "SecurityOpt": ["seccomp=unconfined"],
-                    "Devices": [{"PathOnHost": "/dev/loop-control", "PathInContainer": "/dev/loop-control", "CgroupPermissions": "rwm"}],
-                    "Memory": self._parse_memory_limit(),
-                    "NanoCpus": int(2 * 1e9),
-                },
-            }
-
             try:
+                await self._start_inner()
+            except Exception:
+                # Roll back partially-allocated resources (docker client, temp dir,
+                # half-created container) so a failed start doesn't leak.
+                logger.warning("Sandbox start failed — cleaning up partial state")
+                await self.stop()
+                raise
+
+    async def _start_inner(self) -> None:
+        self._docker = aiodocker.Docker()
+
+        self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
+
+        challenge_root = Path(self.challenge_dir).resolve()
+        distfiles = str(challenge_root / "distfiles")
+        meta_yml = str(challenge_root / "metadata.yml")
+
+        binds: list[str] = [f"{self.workspace_dir}:/challenge/workspace:rw"]
+        if Path(distfiles).exists():
+            binds.append(f"{distfiles}:/challenge/distfiles:ro")
+        else:
+            # No distfiles/ subdir — mount the challenge root directly as distfiles
+            binds.append(f"{str(challenge_root)}:/challenge/distfiles:ro")
+        if Path(meta_yml).exists():
+            binds.append(f"{meta_yml}:/challenge/metadata.yml:ro")
+
+        # Shared knowledge base (HackTricks, PayloadsAllTheThings, etc.)
+        knowledge_dir = Path(__file__).resolve().parents[1] / "knowledge"
+        if knowledge_dir.is_dir():
+            for repo_dir in sorted(knowledge_dir.iterdir()):
+                if repo_dir.is_dir():
+                    binds.append(f"{repo_dir}:/knowledge/{repo_dir.name}:ro")
+
+        self._binds = binds
+
+        config = self._container_config()
+
+        try:
+            self._container = await self._docker.containers.create(config)
+        except aiodocker.exceptions.DockerError as e:
+            if getattr(e, "status", None) == 404 and self.image != "ctf-swarm:base":
+                logger.warning(
+                    "Image %s not found, falling back to ctf-swarm:base",
+                    self.image,
+                )
+                self.image = "ctf-swarm:base"
+                config["Image"] = self.image
                 self._container = await self._docker.containers.create(config)
-            except aiodocker.exceptions.DockerError as e:
-                if getattr(e, "status", None) == 404 and self.image != "ctf-swarm:base":
-                    logger.warning(
-                        "Image %s not found, falling back to ctf-swarm:base",
-                        self.image,
-                    )
-                    self.image = "ctf-swarm:base"
-                    config["Image"] = self.image
-                    self._container = await self._docker.containers.create(config)
-                else:
-                    raise
-            await self._container.start()
-            await _track_start()
+            else:
+                raise
+        await self._container.start()
+        await _track_start()
 
-            info = await self._container.show()
-            short_id = info["Id"][:12]
-            logger.info("Sandbox started: %s", short_id)
+        info = await self._container.show()
+        short_id = info["Id"][:12]
+        logger.info("Sandbox started: %s", short_id)
 
-            # Pre-copy distfiles into workspace so agents have rw copies;
-            # refresh apt lists so agents can `apt install` immediately
-            await self._exec_inner(
-                "cp -r /challenge/distfiles/. /challenge/workspace/ 2>/dev/null || true"
-                " && chmod -R u+x /challenge/workspace/ 2>/dev/null || true"
-                " && apt-get update -qq >/dev/null 2>&1 &",
-                timeout_s=30,
-            )
+        # Container-wide setup only: refresh apt lists so agents can `apt install`
+        # immediately. Distfiles are copied per-model into each solver's own workdir
+        # (see OpenAISolver.start) so the models don't clobber each other's files.
+        await self._exec_inner(
+            self._container,
+            "apt-get update -qq >/dev/null 2>&1 &",
+            timeout_s=30,
+        )
 
     async def _restart_container(self) -> None:
         """Recreate the container with the same mounts (workspace preserved on host)."""
@@ -200,22 +236,7 @@ class DockerSandbox:
                 pass
             self._container = None
 
-        config = {
-            "Image": self.image,
-            "Cmd": ["sleep", "infinity"],
-            "WorkingDir": "/challenge/workspace",
-            "Tty": False,
-            "Labels": {CONTAINER_LABEL: "true"},
-            "HostConfig": {
-                "Binds": self._binds,
-                "ExtraHosts": ["host.docker.internal:host-gateway"],
-                "CapAdd": ["SYS_ADMIN", "SYS_PTRACE"],
-                "SecurityOpt": ["seccomp=unconfined"],
-                "Devices": [{"PathOnHost": "/dev/loop-control", "PathInContainer": "/dev/loop-control", "CgroupPermissions": "rwm"}],
-                "Memory": self._parse_memory_limit(),
-                "NanoCpus": int(2 * 1e9),
-            },
-        }
+        config = self._container_config()
         self._container = await self._docker.containers.create(config)
         await self._container.start()
         self._restart_count += 1
@@ -226,34 +247,53 @@ class DockerSandbox:
         msg = str(e).lower()
         return "404" in msg or "no such container" in msg or "not found" in msg
 
-    async def exec(self, command: str, timeout_s: int = 300) -> ExecResult:
-        if not self._container:
+    async def _restart_if_stale(self, stale: Any) -> None:
+        """Restart the container, but only once if several callers raced on a gone-error.
+
+        `stale` is the container object the caller was using. If another coroutine
+        already swapped in a fresh container, this is a no-op.
+        """
+        async with self._restart_lock:
+            if self._container is stale or self._container is None:
+                await self._restart_container()
+
+    async def exec(self, command: str, timeout_s: int = 300, workdir: str | None = None) -> ExecResult:
+        container = self._container
+        if not container:
             raise RuntimeError("Sandbox not started")
 
-        async with self._lock:
+        # Normal path runs without a global lock so multiple solver models can use
+        # the shared container in parallel. We pass the captured `container` into the
+        # op (rather than reading self._container again) so a concurrent restart that
+        # transiently nulls self._container can't AttributeError us. `workdir` isolates
+        # each solver model into its own subdir of the shared workspace.
+        try:
+            return await self._exec_inner(container, command, timeout_s, workdir)
+        except aiodocker.exceptions.DockerError as e:
+            if not self._is_gone_error(e):
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
             try:
-                return await self._exec_inner(command, timeout_s)
-            except aiodocker.exceptions.DockerError as e:
-                if not self._is_gone_error(e):
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
-                try:
-                    await self._restart_container()
-                    note = (
-                        "NOTE: The sandbox container was automatically restarted. "
-                        "/challenge/distfiles and /challenge/workspace are preserved. "
-                        "Any files you created in /tmp are lost — recreate them if needed."
-                    )
-                    result = await self._exec_inner(command, timeout_s)
-                    result.stderr = (note + "\n" + result.stderr).strip()
-                    return result
-                except Exception as restart_err:
-                    return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
+                await self._restart_if_stale(container)
+                note = (
+                    "NOTE: The sandbox container was automatically restarted. "
+                    "/challenge/distfiles and your workspace are preserved. "
+                    "Any files you created in /tmp are lost — recreate them if needed."
+                )
+                result = await self._exec_inner(self._container, command, timeout_s, workdir)
+                result.stderr = (note + "\n" + result.stderr).strip()
+                return result
+            except Exception as restart_err:
+                return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone and restart failed: {restart_err}")
 
-    async def _exec_inner(self, command: str, timeout_s: int) -> ExecResult:
-        # Wrap command with `timeout` so the container kills the process on expiry.
+    async def _exec_inner(self, container: Any, command: str, timeout_s: int, workdir: str | None = None) -> ExecResult:
+        # cd into the per-model workdir first (one bash -c, so the cd applies to the
+        # whole command including multi-statement scripts). `|| exit 1` avoids silently
+        # running in the wrong directory if the dir is missing.
+        script = command if workdir is None else f"cd {shlex.quote(workdir)} || exit 1\n{command}"
+        # Wrap with `timeout` so the container kills the process on expiry.
         # --signal=KILL ensures hard kill; --kill-after=5 is a safety net.
-        wrapped = f"timeout --signal=KILL --kill-after=5 {timeout_s} bash -c {shlex.quote(command)}"
-        exec_instance = await self._container.exec(
+        wrapped = f"timeout --signal=KILL --kill-after=5 {timeout_s} bash -c {shlex.quote(script)}"
+        exec_instance = await container.exec(
             cmd=["bash", "-c", wrapped],
             stdout=True,
             stderr=True,
@@ -299,18 +339,19 @@ class DockerSandbox:
 
     async def read_file(self, path: str) -> str | bytes:
         """Read a file from the container. Returns str for text, bytes for binary."""
-        if not self._container:
+        container = self._container
+        if not container:
             raise RuntimeError("Sandbox not started")
 
         try:
             tar = await asyncio.wait_for(
-                self._container.get_archive(path),
+                container.get_archive(path),
                 timeout=30,
             )
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._restart_if_stale(container)
                     tar = await asyncio.wait_for(self._container.get_archive(path), timeout=30)
                 except Exception as restart_err:
                     raise RuntimeError(f"Container gone and restart failed: {restart_err}") from e
@@ -341,7 +382,8 @@ class DockerSandbox:
 
     async def write_file(self, path: str, content: str | bytes) -> None:
         """Write a file into the container via tar archive."""
-        if not self._container:
+        container = self._container
+        if not container:
             raise RuntimeError("Sandbox not started")
 
         if isinstance(content, str):
@@ -356,13 +398,13 @@ class DockerSandbox:
 
         try:
             await asyncio.wait_for(
-                self._container.put_archive(str(Path(path).parent), buf.getvalue()),
+                container.put_archive(str(Path(path).parent), buf.getvalue()),
                 timeout=30,
             )
         except aiodocker.exceptions.DockerError as e:
             if self._is_gone_error(e):
                 try:
-                    await self._restart_container()
+                    await self._restart_if_stale(container)
                     await asyncio.wait_for(
                         self._container.put_archive(str(Path(path).parent), buf.getvalue()),
                         timeout=30,

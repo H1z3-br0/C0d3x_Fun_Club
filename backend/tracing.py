@@ -12,6 +12,45 @@ def _sanitize(s: str) -> str:
     return s.replace("/", "_").replace(" ", "_")
 
 
+def summarize_trace(path: str, last_n: int = 40) -> list[str]:
+    """Render the last `last_n` JSONL trace events as short human-readable lines.
+
+    Shared by the swarm's rotation summaries and the coordinator's read_solver_trace.
+    """
+    try:
+        lines = Path(path).read_text().strip().split("\n")
+    except FileNotFoundError:
+        return ["Trace file not found."]
+    except Exception as e:
+        return [f"Trace read error: {e}"]
+
+    summary: list[str] = []
+    for line in lines[-last_n:] if lines else []:
+        try:
+            d = json.loads(line)
+        except Exception:
+            summary.append(line[:120])
+            continue
+        t = d.get("type", "?")
+        step = d.get("step", "?")
+        if t == "tool_call":
+            summary.append(f"step {step} CALL {d.get('tool', '?')}: {str(d.get('args', ''))[:120]}")
+        elif t == "tool_result":
+            summary.append(f"step {step} RESULT {d.get('tool', '?')}: {str(d.get('result', ''))[:120]}")
+        elif t == "model_response":
+            summary.append(f"step {step} MODEL: {str(d.get('text', ''))[:160]}")
+        elif t in ("finish", "error", "bump", "turn_failed"):
+            summary.append(f"** {t}: {json.dumps({k: v for k, v in d.items() if k != 'ts'})}")
+        elif t == "usage":
+            summary.append(
+                f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)} "
+                f"cost=${d.get('cost_usd', 0):.4f}"
+            )
+        else:
+            summary.append(f"{t}: {str(d)[:120]}")
+    return summary
+
+
 class SolverTracer:
     """Append-only JSONL event tracer. Flushes every write for tail -f streaming."""
 

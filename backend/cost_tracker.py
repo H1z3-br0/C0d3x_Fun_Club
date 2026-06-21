@@ -33,11 +33,27 @@ class RunUsage:
 # Provider ID mapping for genai-prices
 PROVIDER_MAP: dict[str, str] = {
     "codex": "openai",
+    "claude": "anthropic",
 }
 
-# Fallback pricing for models not in genai-prices (per 1M tokens, USD).
-# Keep empty unless GPT-5.5 pricing is not available from genai-prices.
-FALLBACK_PRICING: dict[str, dict[str, float]] = {}
+# Local pricing table (per 1M tokens, USD). genai-prices doesn't know these exact
+# model ids (GPT-5.5 is absent; the new Claude Opus ids may lag the snapshot), so we
+# price them here and fall back to genai-prices for anything else.
+#
+# CONFIRMED — published rates. ESTIMATED — best-effort placeholders until the real
+# upstream rate is known; costs derived from these are not trustworthy and are flagged
+# at runtime (see `_warned_estimated`).
+FALLBACK_PRICING: dict[str, dict[str, float]] = {
+    # Claude Opus 4.8 / 4.7: $5.00 input / $25.00 output per 1M; cache reads ~0.1x.
+    "claude-opus-4-8": {"input": 5.00, "cached_input": 0.50, "output": 25.00},
+    "claude-opus-4-7": {"input": 5.00, "cached_input": 0.50, "output": 25.00},
+    # GPT-5.5: ESTIMATE — replace with the real rate from your upstream account.
+    "gpt-5.5": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+}
+
+# Model ids whose pricing above is a guess. Cost for these is reported but unreliable.
+ESTIMATED_PRICING_MODELS: set[str] = {"gpt-5.5"}
+_warned_estimated: set[str] = set()
 
 
 def _calc_fallback_cost(usage: RunUsage, model: str) -> float | None:
@@ -56,24 +72,32 @@ def _calc_fallback_cost(usage: RunUsage, model: str) -> float | None:
 
 
 def calc_cost(usage: RunUsage, model_name: str, provider_spec: str = "") -> float:
-    """Calculate cost using genai-prices with fallback."""
+    """Calculate cost.
+
+    Our own FALLBACK_PRICING is authoritative for the supported models (genai-prices
+    doesn't know these ids); fall back to genai-prices for anything else so the number
+    is never silently $0.
+    """
     if not usage.has_values():
         return 0.0
 
-    provider_id = PROVIDER_MAP.get(provider_spec, "unknown")
+    fallback = _calc_fallback_cost(usage, model_name)
+    if fallback is not None:
+        if model_name in ESTIMATED_PRICING_MODELS and model_name not in _warned_estimated:
+            _warned_estimated.add(model_name)
+            logger.warning(
+                "Cost for %s uses ESTIMATED pricing — reported $ figures are not reliable. "
+                "Set the real rate in FALLBACK_PRICING.", model_name
+            )
+        return fallback
 
+    provider_id = PROVIDER_MAP.get(provider_spec, "unknown")
     try:
         price = calc_price(usage, model_name, provider_id=provider_id)
         return float(price.total_price)
-    except Exception:
-        pass
-
-    fallback = _calc_fallback_cost(usage, model_name)
-    if fallback is not None:
-        return fallback
-
-    logger.warning(f"Could not calculate cost for {model_name}")
-    return 0.0
+    except Exception as e:
+        logger.warning("Could not price %s (%s) — recording $0; add it to FALLBACK_PRICING", model_name, e)
+        return 0.0
 
 
 def _fmt_tokens(n: int) -> str:

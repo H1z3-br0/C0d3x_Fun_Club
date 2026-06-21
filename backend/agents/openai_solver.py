@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -16,14 +17,18 @@ from backend.console import log_model_text, log_tool_call, log_tool_result, log_
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
-from backend.models import context_window, model_id_from_spec, supports_vision, validate_model_spec
-from backend.profiles import image_for_profile, suggest_profile
+from backend.models import (
+    context_window,
+    model_id_from_spec,
+    provider_from_spec,
+    supports_vision,
+    validate_model_spec,
+)
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     CONTEXT_LIMIT,
-    CORRECT_MARKERS,
     ERROR,
     FLAG_FOUND,
     GAVE_UP,
@@ -46,6 +51,32 @@ from backend.tools.core import (
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
+
+
+def _estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
+    """Rough token estimate (~4 chars/token) for when the proxy omits a usage block.
+
+    Keeps context-window rotation and cost tracking functional even if cli-proxy-api
+    returns no usage for streamed Codex/Claude responses.
+    """
+    chars = 0
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                chars += len(str(part))
+        for tc in m.get("tool_calls") or []:
+            chars += len(str(tc))
+    return max(1, chars // 4)
+
+
+def _estimate_completion_tokens(message: _AggMessage) -> int:
+    chars = len(message.content or "")
+    for tc in message.tool_calls or []:
+        chars += len(str(getattr(tc, "function", "")))
+    return max(1, chars // 4)
 
 
 @dataclass
@@ -298,6 +329,7 @@ class OpenAISolver:
     ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: object
+    sandbox: DockerSandbox  # shared across all solver models for this challenge
     cancel_event: asyncio.Event | None = None
     no_submit: bool = False
     submit_fn: Any | None = None
@@ -307,17 +339,15 @@ class OpenAISolver:
     def __post_init__(self) -> None:
         validate_model_spec(self.model_spec)
         self.model_id = model_id_from_spec(self.model_spec)
+        self._provider = provider_from_spec(self.model_spec)
         self.cancel_event = self.cancel_event or asyncio.Event()
-        profile = suggest_profile(self.meta.category)
-        default_image = image_for_profile(profile)
-        # settings.sandbox_image=None → use the per-category profile image.
-        # When the user passes --image, that override wins for every challenge.
-        override = getattr(self.settings, "sandbox_image", None)
-        self.sandbox = DockerSandbox(
-            image=override or default_image,
-            challenge_dir=self.challenge_dir,
-            memory_limit=getattr(self.settings, "container_memory_limit", "4g"),
-        )
+        # The sandbox is owned and lifecycle-managed by ChallengeSwarm — solvers
+        # share it and never start/stop it themselves. Each model gets its OWN
+        # subdir of the shared workspace so concurrent models don't clobber each
+        # other's scripts/patches. Cross-model context is shared via the message
+        # bus (check_findings / bumps), not the filesystem.
+        safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", self.model_id)
+        self.work_dir = f"/challenge/workspace/{safe_model}"
         self.use_vision = supports_vision(self.model_spec)
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(self.meta.name, self.model_id)
@@ -335,6 +365,14 @@ class OpenAISolver:
         if not self.sandbox._container:
             await self.sandbox.start()
 
+        # Set up this model's private workdir with its own rw copy of the distfiles.
+        await self.sandbox.exec(
+            f"mkdir -p {self.work_dir}"
+            f" && cp -r /challenge/distfiles/. {self.work_dir}/ 2>/dev/null || true"
+            f" && chmod -R u+x {self.work_dir}/ 2>/dev/null || true",
+            timeout_s=30,
+        )
+
         arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
         container_arch = arch_result.stdout.strip() or "unknown"
         distfile_names = list_distfiles(self.challenge_dir)
@@ -343,11 +381,19 @@ class OpenAISolver:
             distfile_names,
             container_arch=container_arch,
             has_named_tools=True,
+            workdir=self.work_dir,
         )
 
         base_url = getattr(self.settings, "openai_base_url", "http://localhost:8080/v1")
         api_key = getattr(self.settings, "cliproxy_api_key", "")
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # Hard request timeout so a hung proxy/stream can't wedge the solver forever.
+        self._llm_timeout = float(getattr(self.settings, "llm_timeout_s", 600.0))
+        self._client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=self._llm_timeout,
+            max_retries=2,
+        )
 
         self._messages = [
             {"role": "system", "content": system_prompt},
@@ -362,15 +408,25 @@ class OpenAISolver:
         assert self._client is not None
 
         t0 = time.monotonic()
+        max_steps = int(getattr(self.settings, "max_steps_per_run", 150))
         try:
             while not self.cancel_event.is_set():
+                # Hard per-context-window step ceiling — runaway guard so a solver
+                # that keeps emitting slightly-different tool calls can't loop forever.
+                if self._step_count >= max_steps:
+                    logger.warning(
+                        "[%s] Hit max_steps_per_run (%d) — stopping this run", self.agent_name, max_steps
+                    )
+                    return self._result(GAVE_UP)
+
                 if not self._started:
                     self._messages.append({"role": "user", "content": "Solve this CTF challenge."})
                     self._started = True
 
                 # Use streaming because cli-proxy-api 6.9.7 returns empty content
                 # in non-stream mode for Codex models. Aggregate chunks into a
-                # synthetic ChatCompletion-shaped object.
+                # synthetic ChatCompletion-shaped object. Wrap in wait_for as a hard
+                # ceiling in case the stream trickles without ever completing.
                 stream = await self._client.chat.completions.create(
                     model=self.model_id,
                     messages=self._messages,
@@ -378,44 +434,47 @@ class OpenAISolver:
                     tool_choice="auto",
                     stream=True,
                 )
-                resp = await _aggregate_stream(stream)
-
-                usage = resp.usage
-                if usage:
-                    self.cost_tracker.record_tokens(
-                        self.agent_name,
-                        self.model_id,
-                        input_tokens=usage.prompt_tokens or 0,
-                        output_tokens=usage.completion_tokens or 0,
-                        cache_read_tokens=0,
-                        provider_spec="codex",
-                        duration_seconds=time.monotonic() - t0,
-                    )
-                    agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
-                    cost = agent_usage.cost_usd if agent_usage else 0.0
-                    self.tracer.usage(
-                        usage.prompt_tokens or 0,
-                        usage.completion_tokens or 0,
-                        0,
-                        cost,
-                    )
-                    log_usage(self.agent_name, usage.prompt_tokens or 0, usage.completion_tokens or 0, cost)
-                    self._last_prompt_tokens = usage.prompt_tokens or 0
-
-                    # Context limit check — rotate before the window fills completely
-                    max_ctx = context_window(self.model_spec)
-                    limit_pct = getattr(self.settings, "context_limit_pct", 0.80)
-                    if max_ctx > 0 and self._last_prompt_tokens >= int(max_ctx * limit_pct):
-                        logger.warning(
-                            "[%s] Context at %d/%d (%.0f%%) — generating handoff summary",
-                            self.agent_name, self._last_prompt_tokens, max_ctx,
-                            self._last_prompt_tokens / max_ctx * 100,
-                        )
-                        summary = await self._generate_handoff_summary()
-                        return self._result(CONTEXT_LIMIT, handoff_summary=summary)
+                resp = await asyncio.wait_for(_aggregate_stream(stream), timeout=self._llm_timeout)
 
                 choice = resp.choices[0]
                 message = choice.message
+
+                # Token accounting — fall back to a char-based estimate when the proxy
+                # omits a usage block, so cost tracking and context rotation still work.
+                usage = resp.usage
+                if usage and (usage.prompt_tokens or usage.completion_tokens):
+                    prompt_tokens = usage.prompt_tokens or 0
+                    completion_tokens = usage.completion_tokens or 0
+                else:
+                    prompt_tokens = _estimate_message_tokens(self._messages)
+                    completion_tokens = _estimate_completion_tokens(message)
+
+                self.cost_tracker.record_tokens(
+                    self.agent_name,
+                    self.model_id,
+                    input_tokens=prompt_tokens,
+                    output_tokens=completion_tokens,
+                    cache_read_tokens=0,
+                    provider_spec=self._provider,
+                    duration_seconds=time.monotonic() - t0,
+                )
+                agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
+                cost = agent_usage.cost_usd if agent_usage else 0.0
+                self.tracer.usage(prompt_tokens, completion_tokens, 0, cost)
+                log_usage(self.agent_name, prompt_tokens, completion_tokens, cost)
+                self._last_prompt_tokens = prompt_tokens
+
+                # Context limit check — rotate before the window fills completely
+                max_ctx = context_window(self.model_spec)
+                limit_pct = getattr(self.settings, "context_limit_pct", 0.80)
+                if max_ctx > 0 and self._last_prompt_tokens >= int(max_ctx * limit_pct):
+                    logger.warning(
+                        "[%s] Context at %d/%d (%.0f%%) — generating handoff summary",
+                        self.agent_name, self._last_prompt_tokens, max_ctx,
+                        self._last_prompt_tokens / max_ctx * 100,
+                    )
+                    summary = await self._generate_handoff_summary()
+                    return self._result(CONTEXT_LIMIT, handoff_summary=summary)
 
                 if message.tool_calls:
                     # Append assistant message with tool calls
@@ -458,26 +517,35 @@ class OpenAISolver:
                             result = f"{result}\n\n{LOOP_WARNING_MESSAGE}"
                     t_dur = time.monotonic() - t_start
 
-                    if (
-                        tool_name == "submit_flag"
-                        and isinstance(result, str)
-                        and any(m in result for m in CORRECT_MARKERS)
-                    ):
-                        self._confirmed = True
+                    # NOTE: confirmation is set authoritatively inside _dispatch_tool's
+                    # submit_flag handler from the boolean returned by submit_fn. Do NOT
+                    # re-derive it from the display string — "CORRECT" is a substring of
+                    # "INCORRECT", which would mark a rejected flag as a win.
 
                     self.tracer.tool_result(tool_name, str(result), self._step_count)
                     log_tool_result(self.agent_name, self._step_count, tool_name, str(result)[:500], t_dur)
+
+                    # view_image returns a dict carrying a (potentially multi-MB) base64
+                    # data URL. Keep the tool-result text SHORT — the actual image goes
+                    # into a separate image_url block, not inlined as str(dict).
+                    if isinstance(result, dict) and result.get("_image_data_url"):
+                        tool_content = (
+                            f"Image loaded: {result.get('mime_type', 'image')}, "
+                            f"{result.get('bytes', 0)} bytes (shown below)."
+                        )
+                    else:
+                        tool_content = str(result) if result is not None else ""
 
                     # Tool result message
                     self._messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": str(result) if result is not None else "",
+                            "content": tool_content,
                         }
                     )
 
-                    # If view_image returned image tuple, append user message with image
+                    # If view_image returned an image, append the actual image input.
                     if isinstance(result, dict) and result.get("_image_data_url"):
                         self._messages.append(
                             {
@@ -524,13 +592,13 @@ class OpenAISolver:
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "bash":
-            return await do_bash(self.sandbox, args.get("command", ""), args.get("timeout_seconds", 60))
+            return await do_bash(self.sandbox, args.get("command", ""), args.get("timeout_seconds", 60), workdir=self.work_dir)
         if name == "read_file":
-            return await do_read_file(self.sandbox, args.get("path", ""))
+            return await do_read_file(self.sandbox, args.get("path", ""), workdir=self.work_dir)
         if name == "write_file":
-            return await do_write_file(self.sandbox, args.get("path", ""), args.get("content", ""))
+            return await do_write_file(self.sandbox, args.get("path", ""), args.get("content", ""), workdir=self.work_dir)
         if name == "list_files":
-            return await do_list_files(self.sandbox, args.get("path", "/challenge/distfiles"))
+            return await do_list_files(self.sandbox, args.get("path", "/challenge/distfiles"), workdir=self.work_dir)
         if name == "submit_flag":
             if self.no_submit:
                 self._flag = args.get("flag", "")
@@ -549,7 +617,7 @@ class OpenAISolver:
         if name == "webhook_get_requests":
             return await do_webhook_get_requests(args.get("uuid", ""))
         if name == "view_image":
-            result = await do_view_image(self.sandbox, args.get("filename", ""), use_vision=self.use_vision)
+            result = await do_view_image(self.sandbox, args.get("filename", ""), use_vision=self.use_vision, workdir=self.work_dir)
             if isinstance(result, tuple):
                 image_bytes, mime_type = result
                 data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
@@ -595,6 +663,11 @@ class OpenAISolver:
                 ),
             }
         )
+        # Reset the per-run step counter so a solver that stopped at
+        # max_steps_per_run gets a fresh budget after the bump (otherwise it would
+        # immediately re-hit the cap, return GAVE_UP with 0 new steps, and the swarm
+        # would mark it "broken" — contradicting "never give up").
+        self._step_count = 0
         self.loop_detector.reset()
         self.tracer.event("bump", insights=insights[:500])
 
@@ -668,7 +741,7 @@ class OpenAISolver:
         logger.info("[%s] Context reset with handoff (%d chars)", self.agent_name, len(summary))
 
     async def stop(self) -> None:
+        # Note: the shared sandbox is NOT stopped here — ChallengeSwarm owns its
+        # lifecycle. A finished solver must not kill the container its siblings use.
         self.tracer.event("stop", step_count=self._step_count)
         self.tracer.close()
-        if self.sandbox:
-            await self.sandbox.stop()

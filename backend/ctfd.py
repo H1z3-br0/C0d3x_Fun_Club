@@ -28,6 +28,7 @@ class CTFdClient:
     token: str = ""
     username: str = "admin"
     password: str = "admin"
+    verify_tls: bool = True
 
     _client: httpx.AsyncClient | None = field(default=None, repr=False)
     _csrf_token: str = ""
@@ -36,12 +37,12 @@ class CTFdClient:
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            # verify=False: CTFd instances often use self-signed certs or HTTP.
-            # This is a CTF tool, not production infrastructure.
+            # TLS verification defaults ON (the CTFd token rides on these requests).
+            # Disable explicitly via CTFD_VERIFY_TLS=false for a self-signed CTFd.
             self._client = httpx.AsyncClient(
                 base_url=self.base_url.rstrip("/"),
                 follow_redirects=False,
-                verify=False,
+                verify=self.verify_tls,
                 timeout=30.0,
                 headers={"User-Agent": USER_AGENT},
             )
@@ -233,7 +234,11 @@ class CTFdClient:
             dist_dir.mkdir(exist_ok=True)
             url = raw_url if raw_url.startswith("http") else f"{self.base_url.rstrip('/')}/{raw_url.lstrip('/')}"
             url_path = urlparse(url).path
-            fname = url_path.rstrip("/").rsplit("/", 1)[-1] or "file"
+            # Trust nothing from the remote: take only the final path component and
+            # drop any traversal/separator tricks before joining onto dist_dir.
+            fname = Path(url_path).name
+            if fname in ("", ".", ".."):
+                fname = "file"
             dest = dist_dir / fname
             if not dest.exists():
                 try:

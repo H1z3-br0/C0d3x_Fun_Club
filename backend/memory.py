@@ -61,6 +61,11 @@ class MemoryStore:
         return self.db.create_table("solutions", schema=schema, data=[])
 
     def _embed(self, text: str) -> list[float]:
+        """Hashed bag-of-words vector — keyword/token overlap, NOT a semantic embedding.
+
+        Cheap and dependency-free, but recall is purely lexical: synonyms and
+        paraphrases won't match. Swap in a real embedding model for semantic recall.
+        """
         vec = [0.0] * EMBED_DIM
         tokens = TOKEN_RE.findall(text.lower())
         for token in tokens:

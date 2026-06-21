@@ -23,7 +23,7 @@ build/
 .venv/
 .mypy_cache/
 .ruff_cache/
-uv.lock
+# uv.lock is committed — it pins reproducible dependency versions for this app/CLI.
 
 # Knowledge base (cloned via scripts/fetch-knowledge.sh)
 knowledge/
@@ -35,3 +35,6 @@ findings/
 workspace/
 codex-schema-*/
 .claude/
+
+# Local cli-proxy-api config (copy from config.example.yaml; contains your access key)
+config.yaml
