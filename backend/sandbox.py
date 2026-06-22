@@ -104,6 +104,7 @@ class DockerSandbox:
     image: str
     challenge_dir: str
     memory_limit: str = "16g"
+    challenge_name: str = ""  # tags the container so `docker ps` shows which task it serves
     workspace_dir: str = ""
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
@@ -120,6 +121,14 @@ class DockerSandbox:
             raise RuntimeError("Sandbox not started")
         return self._container.id
 
+    def _labels(self) -> dict[str, str]:
+        labels = {CONTAINER_LABEL: "true"}
+        if self.challenge_name:
+            # Lets `docker ps --filter label=ctf-agent` show which task a
+            # container belongs to (one container per challenge).
+            labels["ctf-challenge"] = self.challenge_name
+        return labels
+
     def _container_config(self) -> dict[str, Any]:
         """Docker create() config. Single source of truth for start() and restart."""
         return {
@@ -127,7 +136,7 @@ class DockerSandbox:
             "Cmd": ["sleep", "infinity"],
             "WorkingDir": "/challenge/workspace",
             "Tty": False,
-            "Labels": {CONTAINER_LABEL: "true"},
+            "Labels": self._labels(),
             "HostConfig": {
                 "Binds": self._binds,
                 "ExtraHosts": ["host.docker.internal:host-gateway"],
