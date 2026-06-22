@@ -83,7 +83,7 @@ def log_tool_call(agent: str, step: int, tool: str, args: dict) -> None:
         return
     s = _style_for(agent)
     summary = _truncate(_format_args(tool, args))
-    icon = ">>>" if tool == "submit_flag" else ">>>"
+    icon = ">>>"
     _console.print(
         f"[dim]{_ts()}[/dim] [{s}]{agent:<26}[/{s}] "
         f"{icon} [bold]{tool}[/bold]: {summary}",

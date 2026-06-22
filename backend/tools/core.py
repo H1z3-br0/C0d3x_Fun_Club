@@ -1,8 +1,12 @@
-"""SDK-agnostic tool logic — pure async functions, no Pydantic AI types."""
+"""SDK-agnostic tool logic — pure async functions, no model-SDK types."""
 
+import asyncio
+import ipaddress
 import json
 import shlex
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,8 +21,15 @@ def _truncate(text: str, limit: int = MAX_OUTPUT) -> str:
     return head[:limit] + f"\n... [truncated — {len(text)} total chars, {len(lines)} lines]"
 
 
-async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
-    result = await sandbox.exec(command, timeout_s=timeout_seconds)
+def _resolve(path: str, workdir: str | None) -> str:
+    """Resolve a model-supplied path: absolute as-is, relative against the model's workdir."""
+    if workdir and not path.startswith("/"):
+        return f"{workdir.rstrip('/')}/{path}"
+    return path
+
+
+async def do_bash(sandbox, command: str, timeout_seconds: int = 60, workdir: str | None = None) -> str:
+    result = await sandbox.exec(command, timeout_s=timeout_seconds, workdir=workdir)
     parts: list[str] = []
     if result.stdout:
         parts.append(result.stdout)
@@ -30,7 +41,8 @@ async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
     return _truncate(out)
 
 
-async def do_read_file(sandbox, path: str) -> str:
+async def do_read_file(sandbox, path: str, workdir: str | None = None) -> str:
+    path = _resolve(path, workdir)
     try:
         data = await sandbox.read_file(path)
     except Exception as e:
@@ -57,7 +69,8 @@ async def do_read_file(sandbox, path: str) -> str:
     return _truncate(data) if isinstance(data, str) else data
 
 
-async def do_write_file(sandbox, path: str, content: str) -> str:
+async def do_write_file(sandbox, path: str, content: str, workdir: str | None = None) -> str:
+    path = _resolve(path, workdir)
     try:
         await sandbox.write_file(path, content)
         return f"Written {len(content)} bytes to {path}"
@@ -65,7 +78,8 @@ async def do_write_file(sandbox, path: str, content: str) -> str:
         return f"Error writing file: {e}"
 
 
-async def do_list_files(sandbox, path: str = "/challenge/distfiles") -> str:
+async def do_list_files(sandbox, path: str = "/challenge/distfiles", workdir: str | None = None) -> str:
+    path = _resolve(path, workdir)
     result = await sandbox.exec(f"ls -la {shlex.quote(path)}")
     out = result.stdout.strip()
     if result.exit_code != 0:
@@ -87,25 +101,54 @@ async def do_submit_flag(ctfd, challenge_name: str, flag: str) -> tuple[str, boo
         return f"submit_flag error: {e}", False
 
 
-def _is_internal_url(url: str) -> bool:
-    from urllib.parse import urlparse
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _resolve_is_internal(url: str) -> bool:
+    """Block fetches that resolve to internal/private addresses.
+
+    Resolves the hostname via DNS and checks every returned address — so a public
+    hostname pointing at an internal IP (decimal/hex IP literals, IPv6) is caught, not
+    just literal RFC1918 strings. Unresolvable hosts are allowed through (httpx fails
+    the connection itself).
+
+    Best-effort only: this is a pre-connect check, and httpx re-resolves at connect
+    time, so a DNS-rebinding host that flips its answer between the two lookups could
+    slip past. A true fix would pin the resolved IP into the connection. We don't,
+    because the solver already has unrestricted network via `bash` in the sandbox —
+    this guard stops accidental/obvious internal fetches, not a determined attacker.
+    """
     host = urlparse(url).hostname or ""
-    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+    if not host:
         return True
-    if host.startswith("169.254.") or host.startswith("10.") or host.startswith("192.168."):
-        return True
-    if host.startswith("172."):
+    try:
+        return _ip_is_blocked(ipaddress.ip_address(host))
+    except ValueError:
+        pass  # not a literal IP — resolve it
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
         try:
-            second_octet = int(host.split(".")[1])
-            if 16 <= second_octet <= 31:
+            if _ip_is_blocked(ipaddress.ip_address(info[4][0])):
                 return True
-        except (ValueError, IndexError):
-            pass
+        except ValueError:
+            continue
     return False
 
 
 async def do_web_fetch(url: str, method: str = "GET", body: str = "") -> str:
-    if _is_internal_url(url):
+    # getaddrinfo is blocking — run it in a thread.
+    if await asyncio.to_thread(_resolve_is_internal, url):
         return "Fetch error: access to internal/private networks is blocked."
     try:
         # verify=False: CTF challenge services often use self-signed certs
@@ -232,7 +275,9 @@ def _has_valid_magic(data: bytes, mime_type: str) -> bool:
     return all(i < len(data) and data[i] == b for i, b in enumerate(magic))
 
 
-async def do_view_image(sandbox, filename: str, use_vision: bool) -> tuple[bytes, str] | str:
+async def do_view_image(
+    sandbox, filename: str, use_vision: bool, workdir: str | None = None
+) -> tuple[bytes, str] | str:
     """Returns (image_bytes, media_type) on success, or error string."""
     # Strip leading path if model passes full container path
     basename = Path(filename).name
@@ -245,10 +290,13 @@ async def do_view_image(sandbox, filename: str, use_vision: bool) -> tuple[bytes
         return "Vision not available for this model. Use bash tools (steghide, zsteg, exiftool, strings) instead."
 
     # Try the filename as-is first (if it's an absolute path), then search standard dirs
+    # (the model's own workdir first, then shared distfiles).
     search_paths = []
     if filename.startswith("/"):
         search_paths.append(filename)
-    search_paths.extend([f"/challenge/distfiles/{basename}", f"/challenge/workspace/{basename}"])
+    if workdir:
+        search_paths.append(f"{workdir.rstrip('/')}/{basename}")
+    search_paths.append(f"/challenge/distfiles/{basename}")
 
     for path in search_paths:
         try:
@@ -256,7 +304,7 @@ async def do_view_image(sandbox, filename: str, use_vision: bool) -> tuple[bytes
             if not _has_valid_magic(data, mime_type):
                 return (
                     "Cannot load image: file appears invalid or corrupted. "
-                    "Fix the magic bytes in the sandbox first, save to /challenge/workspace/, "
+                    "Fix the magic bytes in the sandbox first, save it into your workspace, "
                     "then call view_image again."
                 )
             if len(data) > MAX_IMAGE_BYTES:

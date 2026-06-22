@@ -1,4 +1,4 @@
-"""Shared coordinator event loop — used by both Claude SDK and Codex coordinators."""
+"""Shared coordinator event loop driving the OpenAI-compatible coordinator."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ def build_deps(
         token=settings.ctfd_token,
         username=settings.ctfd_user,
         password=settings.ctfd_pass,
+        verify_tls=settings.ctfd_verify_tls,
     )
     cost_tracker = CostTracker()
     specs = validate_model_specs(model_specs or list(DEFAULT_MODELS))
@@ -120,7 +121,7 @@ async def run_event_loop(
         # Auto-spawn swarms for unsolved challenges if coordinator LLM didn't
         await _auto_spawn_unsolved(deps, poller)
 
-        last_status = asyncio.get_event_loop().time()
+        last_status = asyncio.get_running_loop().time()
 
         while True:
             events = []
@@ -146,11 +147,13 @@ async def run_event_loop(
                 elif evt.kind == "challenge_solved":
                     parts.append(f"SOLVED: '{evt.challenge_name}' — swarm auto-killed.")
 
-            # Detect finished swarms
+            # Detect finished swarms. Also drop them from deps.swarms — otherwise
+            # _auto_spawn_one sees the stale entry and refuses to respawn the challenge.
             for name, task in list(deps.swarm_tasks.items()):
                 if task.done():
                     parts.append(f"SOLVER FINISHED: Swarm for '{name}' completed. Check results or retry.")
                     deps.swarm_tasks.pop(name, None)
+                    deps.swarms.pop(name, None)
 
             # Drain solver-to-coordinator messages
             while True:
@@ -170,7 +173,7 @@ async def run_event_loop(
                     break
 
             # Periodic status update — only when there are active swarms or other events
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             if now - last_status >= status_interval:
                 last_status = now
                 active = [n for n, t in deps.swarm_tasks.items() if not t.done()]

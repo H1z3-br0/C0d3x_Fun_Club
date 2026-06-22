@@ -2,28 +2,29 @@
 set -euo pipefail
 
 cat <<'EOF'
-CTF container helpers:
-  ctf-install apt <package...>      install extra Debian packages via temporary installer container
-  ctf-install pip <package...>      install extra Python packages into shared tool-cache
-  ctf-install gem <gem...>          install Ruby gems into shared tool-cache
-  ctf-install cargo <crate...>      install Rust crates into shared tool-cache
-  ctf-install go <module@version>   install Go tools into shared tool-cache
-  ctf-install npm <package...>      install Node tools into shared tool-cache
+CTF container helpers (single ctf-swarm:base image):
 
-Important writable paths:
-  /workspace/artifacts
-  /workspace/tool-cache
-  /workspace/tool-cache/bin
+  ctf-install apt <package...>      install extra Debian packages
+  ctf-install pip <package...>      install extra Python packages into the tool-cache
+  ctf-install gem <gem...>          install Ruby gems into the tool-cache
+  ctf-install cargo <crate...>      install Rust crates into the tool-cache
+  ctf-install go <module@version>   install Go tools into the tool-cache
+  ctf-install npm <package...>      install Node tools into the tool-cache
 
-Read-only input path:
-  /workspace/task
+Baked in: python3/pip, node/npm, go, gcc/g++, gdb, git, curl, file, xxd,
+          nc (netcat-openbsd), socat, plus Python pwntools/pycryptodome/python-magic.
+Everything else installs on demand with the commands above (or plain apt-get/pip).
+
+Paths:
+  /challenge/workspace              your CWD, read-write, persists across restarts
+  /challenge/workspace/.tool-cache  where ctf-install caches tools (also persistent)
+  /challenge/distfiles              read-only original challenge files
 EOF
 
-printf 'Tool-cache: %s\n' "${CTF_TOOL_CACHE:-/workspace/tool-cache}"
-printf '\nBaked-in toolchain (everything else: ctf-install ...):\n'
-for tool in \
-  python pip node npm go gcc g++ gdb \
-  git curl wget file xxd unzip; do
+printf '\nTool-cache: %s\n' "${CTF_TOOL_CACHE:-/challenge/workspace/.tool-cache}"
+printf 'Available now:\n'
+for tool in python3 pip node npm go gcc g++ gdb git curl file xxd nc socat \
+            objdump strings nm pwntools; do
   if command -v "${tool}" >/dev/null 2>&1; then
     printf '  - %s -> %s\n' "${tool}" "$(command -v "${tool}")"
   fi

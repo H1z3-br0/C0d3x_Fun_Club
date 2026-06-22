@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -28,6 +27,7 @@ from backend.solver_base import (
     SolverProtocol,
     SolverResult,
 )
+from backend.tracing import summarize_trace
 
 if TYPE_CHECKING:
     from backend.config import Settings
@@ -37,42 +37,6 @@ logger = logging.getLogger(__name__)
 
 def _safe_slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip()) or "unknown"
-
-
-def _summarize_trace(path: str, last_n: int = 40) -> list[str]:
-    try:
-        lines = Path(path).read_text().strip().split("\n")
-    except FileNotFoundError:
-        return ["Trace file not found."]
-    except Exception as e:
-        return [f"Trace read error: {e}"]
-    recent = lines[-last_n:] if lines else []
-    summary: list[str] = []
-    for line in recent:
-        try:
-            d = json.loads(line)
-            t = d.get("type", "?")
-            if t == "tool_call":
-                args_str = str(d.get("args", ""))[:120]
-                summary.append(f"step {d.get('step','?')} CALL {d.get('tool','?')}: {args_str}")
-            elif t == "tool_result":
-                result_str = str(d.get("result", ""))[:120]
-                summary.append(f"step {d.get('step','?')} RESULT {d.get('tool','?')}: {result_str}")
-            elif t == "model_response":
-                text = str(d.get("text", ""))[:160]
-                summary.append(f"step {d.get('step','?')} MODEL: {text}")
-            elif t in ("finish", "error", "bump", "turn_failed"):
-                summary.append(f"** {t}: {json.dumps({k:v for k,v in d.items() if k != 'ts'})}")
-            elif t == "usage":
-                summary.append(
-                    f"usage: in={d.get('input_tokens',0)} out={d.get('output_tokens',0)} "
-                    f"cost=${d.get('cost_usd',0):.4f}"
-                )
-            else:
-                summary.append(f"{t}: {str(d)[:120]}")
-        except Exception:
-            summary.append(line[:120])
-    return summary
 
 
 @dataclass
@@ -90,9 +54,6 @@ class ChallengeSwarm:
     memory_store: MemoryStore | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    # One Docker container per challenge, picked by category, shared by all the
-    # solver agents racing on this challenge. Built and torn down in run().
-    sandbox: DockerSandbox | None = None
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
@@ -101,22 +62,14 @@ class ChallengeSwarm:
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+    sandbox: DockerSandbox = field(init=False)
 
     def __post_init__(self) -> None:
         self.model_specs = validate_model_specs(self.model_specs)
-
-
-    def _build_sandbox(self) -> DockerSandbox:
-        """Build the one container for this challenge.
-
-        A single base image is used for every challenge; agents install any
-        domain tools they need at runtime. ``settings.sandbox_image`` (set via
-        ``--image``) overrides the image for every challenge.
-        """
-        override = getattr(self.settings, "sandbox_image", None)
-        image = override or DEFAULT_SANDBOX_IMAGE
-        return DockerSandbox(
-            image=image,
+        # One container per challenge, shared by every solver model. Heavy tooling is
+        # installed on demand inside it via `ctf-install`.
+        self.sandbox = DockerSandbox(
+            image=getattr(self.settings, "sandbox_image", None) or DEFAULT_SANDBOX_IMAGE,
             challenge_dir=self.challenge_dir,
             challenge_name=self.meta.name,
             memory_limit=getattr(self.settings, "container_memory_limit", "16g"),
@@ -289,6 +242,10 @@ class ChallengeSwarm:
                     self.meta.name, model_spec, len(handoff),
                 )
                 solver.reset_with_handoff(handoff)
+                # Solver resets its own step_count to 0 on handoff; reset our deltas
+                # too so the next iteration's run_steps/run_cost stay non-negative.
+                steps_before = 0
+                cost_before = result.cost_usd
                 bump_count = 0
                 consecutive_errors = 0
                 continue
@@ -324,6 +281,10 @@ class ChallengeSwarm:
                     pass  # cooldown elapsed, proceed with bump
                 insights = await self._gather_sibling_insights(model_spec)
                 solver.bump(insights)
+                # bump() resets the solver's step_count to 0 — keep our delta baseline
+                # in sync so run_steps stays meaningful next iteration.
+                steps_before = 0
+                cost_before = result.cost_usd
                 logger.info(
                     f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming"
                 )
@@ -332,28 +293,14 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
-        """Start the shared container, race all solvers, then tear it down."""
-        self.sandbox = self._build_sandbox()
+        """Run all solver models in parallel against one shared container."""
+        # One container for the whole swarm — started once here, stopped once below.
         try:
             await self.sandbox.start()
         except Exception as e:
-            logger.error(
-                "[%s] Failed to start challenge container (%s): %s",
-                self.meta.name, self.sandbox.image, e, exc_info=True,
-            )
-            await self.sandbox.stop()
-            self.sandbox = None
+            logger.error(f"[{self.meta.name}] Sandbox start failed: {e}", exc_info=True)
             return None
 
-        try:
-            return await self._race_solvers()
-        finally:
-            if self.sandbox:
-                await self.sandbox.stop()
-                self.sandbox = None
-
-    async def _race_solvers(self) -> SolverResult | None:
-        """Run all solvers in parallel. Returns the winner's result or None."""
         tasks = [
             asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
             for spec in self.model_specs
@@ -386,6 +333,8 @@ class ChallengeSwarm:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             return None
+        finally:
+            await self.sandbox.stop()
 
     async def _save_solution(self, result: SolverResult, model_spec: str) -> None:
         if not self.memory_store:
@@ -395,7 +344,9 @@ class ChallengeSwarm:
             techniques = [f.content for f in latest.values() if f.content]
             techniques_worked = "\n".join(techniques) if techniques else (result.findings_summary or "")
             key_insight = result.findings_summary or f"Flag confirmed by {model_spec}"
-            self.memory_store.save_solution(
+            # lancedb write is synchronous — keep it off the event loop.
+            await asyncio.to_thread(
+                self.memory_store.save_solution,
                 task_name=self.meta.name,
                 ctf_name="",
                 category=self.meta.category,
@@ -428,7 +379,7 @@ class ChallengeSwarm:
                 "## Trace (last events)",
             ]
             if result.log_path:
-                lines.extend(_summarize_trace(result.log_path, last_n=40))
+                lines.extend(summarize_trace(result.log_path, last_n=40))
             else:
                 lines.append("No trace path available.")
             summary_path.write_text("\n".join(lines), encoding="utf-8")

@@ -8,7 +8,12 @@ clone_or_pull() {
     local repo="$1" dir="$2"
     if [ -d "$dir/.git" ]; then
         echo "Updating $dir ..."
-        git -C "$dir" pull --ff-only --depth=1 2>/dev/null || git -C "$dir" fetch --depth=1 && git -C "$dir" reset --hard origin/HEAD
+        # Only hard-reset when the fast-forward pull fails (grouped so `reset --hard`
+        # doesn't run after a successful pull due to && / || precedence).
+        git -C "$dir" pull --ff-only --depth=1 2>/dev/null || {
+            git -C "$dir" fetch --depth=1
+            git -C "$dir" reset --hard origin/HEAD
+        }
     else
         echo "Cloning $repo -> $dir ..."
         git clone --depth=1 "$repo" "$dir"

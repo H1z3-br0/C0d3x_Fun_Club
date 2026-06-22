@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 # Status constants
 FLAG_FOUND = "flag_found"
@@ -12,9 +12,8 @@ CANCELLED = "cancelled"
 ERROR = "error"
 QUOTA_ERROR = "quota_error"
 CONTEXT_LIMIT = "context_limit"  # Context window nearly full — rotate to fresh agent
-
-# Flag confirmation markers from CTFd
-CORRECT_MARKERS = ("CORRECT", "ALREADY SOLVED")
+# NOTE: flag confirmation is a boolean from CTFdClient.submit_flag (status check),
+# never a substring match on the display string ("CORRECT" is inside "INCORRECT").
 
 
 @dataclass
@@ -29,11 +28,11 @@ class SolverResult:
 
 
 class SolverProtocol(Protocol):
-    """Common interface for all solver backends (Pydantic AI, Claude SDK, Codex)."""
+    """Common interface implemented by the OpenAI-compatible solver."""
 
     model_spec: str
     agent_name: str
-    sandbox: object
+    sandbox: Any
 
     async def start(self) -> None: ...
     async def run_until_done_or_gave_up(self) -> SolverResult: ...

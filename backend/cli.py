@@ -14,7 +14,12 @@ import click
 from rich.console import Console
 
 from backend.config import Settings
-from backend.models import DEFAULT_MODELS, ONLY_MODEL_ID, validate_model_spec, validate_model_specs
+from backend.models import (
+    ALLOWED_MODELS_HELP,
+    DEFAULT_MODELS,
+    validate_model_spec,
+    validate_model_specs,
+)
 
 console = Console()
 
@@ -55,8 +60,8 @@ def _check_proxy_reachable(settings: Settings) -> None:
         console.print(
             f"[bold red]fatal:[/bold red] cli-proxy-api at {settings.openai_base_url} "
             f"is not reachable ({e}).\n"
-            "Start it with: "
-            "/home/dima/cliproxyapi/cli-proxy-api --config /home/dima/cliproxyapi/config.yaml"
+            "Start it first, e.g.: cli-proxy-api --config config.yaml "
+            "(see README.md → Quick Start)."
         )
         sys.exit(2)
 
@@ -72,12 +77,12 @@ def cli() -> None:
 @click.option(
     "--image",
     default=None,
-    help="Sandbox image override for every challenge. Default: ctf-swarm:base.",
+    help="Sandbox image override. Default: ctf-swarm:base (one image for everything).",
 )
 @click.option(
     "--models",
     multiple=True,
-    help=f"Solver model specs. Only {ONLY_MODEL_ID} is allowed.",
+    help=f"Solver model specs (repeatable). Allowed ids: {ALLOWED_MODELS_HELP}.",
 )
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
@@ -85,7 +90,7 @@ def cli() -> None:
 @click.option(
     "--coordinator-model",
     default=None,
-    help=f"Model for coordinator. Only {ONLY_MODEL_ID} is allowed.",
+    help=f"Model for coordinator. Allowed ids: {ALLOWED_MODELS_HELP}.",
 )
 @click.option("--max-challenges", default=3, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto-pick)")
@@ -132,7 +137,8 @@ def main(
     console.print(f"  CTFd: {settings.ctfd_url}")
     console.print(f"  Proxy: {settings.openai_base_url}")
     console.print(f"  Models: {', '.join(model_specs)}")
-    console.print(f"  Image: {settings.sandbox_image or 'ctf-swarm:base'}")
+    from backend.sandbox import DEFAULT_SANDBOX_IMAGE
+    console.print(f"  Image: {settings.sandbox_image or DEFAULT_SANDBOX_IMAGE}")
     console.print(f"  Max challenges: {max_challenges}")
     console.print()
 
@@ -156,10 +162,9 @@ async def _run_single(
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    # One shared container per challenge (agents of a swarm share it), so the
-    # concurrent-start cap tracks challenges, not challenges × models.
-    max_containers = max(1, max_challenges)
-    configure_semaphore(max_containers)
+    # One container per challenge now (shared by all solver models), so the
+    # concurrent-start cap is just the number of challenges in flight.
+    configure_semaphore(max_challenges)
     await cleanup_orphan_containers()
 
     challenge_path = Path(challenge_dir)
@@ -176,6 +181,7 @@ async def _run_single(
         token=settings.ctfd_token,
         username=settings.ctfd_user,
         password=settings.ctfd_pass,
+        verify_tls=settings.ctfd_verify_tls,
     )
     cost_tracker = CostTracker()
 
@@ -217,10 +223,8 @@ async def _run_coordinator(
     """Run the full coordinator (continuous until Ctrl+C)."""
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    # One shared container per challenge (agents of a swarm share it), so the
-    # concurrent-start cap tracks challenges, not challenges × models.
-    max_containers = max(1, max_challenges)
-    configure_semaphore(max_containers)
+    # One container per challenge (shared by all solver models).
+    configure_semaphore(max_challenges)
     await cleanup_orphan_containers()
     console.print("[bold]Starting coordinator (Ctrl+C to stop)...[/bold]\n")
 

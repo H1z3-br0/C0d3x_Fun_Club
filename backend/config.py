@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     ctfd_user: str = "admin"
     ctfd_pass: str = "admin"
     ctfd_token: str = ""
+    # TLS verification for the CTFd connection. Default ON — set CTFD_VERIFY_TLS=false
+    # only for a self-signed/HTTP CTFd you trust (otherwise the token can be MITM'd).
+    ctfd_verify_tls: bool = True
 
     # CLIProxyAPI (OpenAI-compatible local proxy).
     #
@@ -28,15 +31,19 @@ class Settings(BaseSettings):
     cliproxy_api_key: str = ""
 
     # Infra
-    # sandbox_image=None → use the single default image (backend.sandbox.
-    # DEFAULT_SANDBOX_IMAGE). Set via --image to override it for every challenge.
+    # sandbox_image=None → use the single default image (ctf-swarm:base).
+    # Override with --image / SANDBOX_IMAGE to force a different one.
     sandbox_image: str | None = None
     max_concurrent_challenges: int = 3
-    max_attempts_per_challenge: int = 3
     container_memory_limit: str = "16g"
     findings_dir: str = "findings"
     memory_dir: str = "findings/memory"
     context_limit_pct: float = 0.80  # Rotate agent when prompt tokens reach this fraction of context window
+
+    # Runaway guards (see backend/agents/openai_solver.py)
+    llm_timeout_s: float = 600.0  # Hard ceiling on a single LLM request/stream
+    max_steps_per_run: int = 150  # Max tool steps per context window before forcing a stop
+    coordinator_max_tool_rounds: int = 50  # Max tool-call rounds per coordinator turn
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

@@ -1,7 +1,7 @@
 [project]
 name = "ctf-agent-two"
 version = "0.1.0"
-description = "CTF agent v2 - GPT-5.5 solver swarm"
+description = "CTF agent v2 - multi-model solver swarm (GPT-5.5 + Claude Opus) via cli-proxy-api"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-settings",
@@ -16,6 +16,11 @@ dependencies = [
     "lancedb",
     "pyarrow",
 ]
+
+[project.optional-dependencies]
+# Standalone challenge downloader (pull_challenges.py) — not used by the agent itself.
+#   uv sync --extra pull
+pull = ["aiohttp", "beautifulsoup4"]
 
 [project.scripts]
 ctf-agent = "backend.cli:cli"
@@ -38,6 +43,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"

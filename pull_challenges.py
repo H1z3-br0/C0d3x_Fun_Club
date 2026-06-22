@@ -23,12 +23,10 @@ import io
 import re
 import sys
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
 
-import yaml
-
 import aiohttp
+import yaml
 from bs4 import BeautifulSoup
 from markdownify import markdownify as html2md
 
@@ -39,15 +37,22 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, lik
 # Auth
 # ---------------------------------------------------------------------------
 
+
 def token_headers(token: str) -> dict:
     return {"User-Agent": USER_AGENT, "Authorization": f"Token {token}"}
 
 
-async def login_password(session: aiohttp.ClientSession, base_url: str, username: str, password: str) -> bool:
+async def login_password(
+    session: aiohttp.ClientSession, base_url: str, username: str, password: str
+) -> bool:
     """Login to CTFd and populate session cookies. Returns True on success."""
     # Fetch login page to get nonce + initial cookies
-    async with session.get(f"{base_url}/login", headers={"User-Agent": USER_AGENT}) as resp:
-        nonce_tag = BeautifulSoup(await resp.text(), "html.parser").find("input", {"id": "nonce"})
+    async with session.get(
+        f"{base_url}/login", headers={"User-Agent": USER_AGENT}
+    ) as resp:
+        nonce_tag = BeautifulSoup(await resp.text(), "html.parser").find(
+            "input", {"id": "nonce"}
+        )
         if nonce_tag is None:
             print("ERROR: Could not find nonce on login page.", file=sys.stderr)
             return False
@@ -72,14 +77,14 @@ async def login_password(session: aiohttp.ClientSession, base_url: str, username
         return True
 
 
-async def verify_token(base_url: str, token: str) -> bool:
+async def verify_token(base_url: str, token: str, verify_ssl: bool = True) -> bool:
     """Check that the token is valid by hitting /api/v1/users/me."""
     async with aiohttp.request(
         method="get",
         url=f"{base_url}/api/v1/users/me",
         headers=token_headers(token),
         allow_redirects=False,
-        ssl=False,
+        ssl=verify_ssl,
     ) as resp:
         if resp.status != 200:
             print("ERROR: Token auth failed — invalid token?", file=sys.stderr)
@@ -92,7 +97,10 @@ async def verify_token(base_url: str, token: str) -> bool:
 # API helpers
 # ---------------------------------------------------------------------------
 
-async def api_get(session: aiohttp.ClientSession, url: str, extra_headers: Optional[dict] = None) -> Optional[dict]:
+
+async def api_get(
+    session: aiohttp.ClientSession, url: str, extra_headers: dict | None = None
+) -> dict | None:
     headers = {"User-Agent": USER_AGENT}
     if extra_headers:
         headers.update(extra_headers)
@@ -105,7 +113,9 @@ async def api_get(session: aiohttp.ClientSession, url: str, extra_headers: Optio
         return data
 
 
-async def fetch_bytes(session: aiohttp.ClientSession, url: str, extra_headers: Optional[dict] = None) -> Optional[io.BytesIO]:
+async def fetch_bytes(
+    session: aiohttp.ClientSession, url: str, extra_headers: dict | None = None
+) -> io.BytesIO | None:
     headers = {"User-Agent": USER_AGENT}
     if extra_headers:
         headers.update(extra_headers)
@@ -119,10 +129,13 @@ async def fetch_bytes(session: aiohttp.ClientSession, url: str, extra_headers: O
 # HTML / text helpers (mirrors Eruditus utils/formatting.py and utils/html.py)
 # ---------------------------------------------------------------------------
 
-def html_to_markdown(html: Optional[str]) -> str:
+
+def html_to_markdown(html: str | None) -> str:
     if not html:
         return ""
-    md = html2md(html, heading_style="atx", escape_asterisks=False, escape_underscores=False)
+    md = html2md(
+        html, heading_style="atx", escape_asterisks=False, escape_underscores=False
+    )
     # strip embedded image lines (keep file links but not inline images)
     md = re.sub(r"[^\S\r\n]*!\[[^\]]*\]\([^)]*\)\s*", "", md)
     md = re.sub(r"\n{3,}", "\n\n", md)
@@ -154,11 +167,16 @@ def make_absolute(url: str, base_url: str) -> str:
 # Challenge pulling
 # ---------------------------------------------------------------------------
 
-async def get_csrf_nonce(session: aiohttp.ClientSession, base_url: str, extra_headers: Optional[dict]) -> Optional[str]:
+
+async def get_csrf_nonce(
+    session: aiohttp.ClientSession, base_url: str, extra_headers: dict | None
+) -> str | None:
     """Fetch CSRF nonce from the challenges page. Not needed for token auth."""
     if extra_headers and "Authorization" in extra_headers:
         return None
-    async with session.get(f"{base_url}/challenges", headers={"User-Agent": USER_AGENT}) as resp:
+    async with session.get(
+        f"{base_url}/challenges", headers={"User-Agent": USER_AGENT}
+    ) as resp:
         match = re.search(r"csrfNonce': \"([A-Fa-f0-9]+)\"", await resp.text())
         return match.group(1) if match else None
 
@@ -167,7 +185,7 @@ async def fetch_hints(
     session: aiohttp.ClientSession,
     base_url: str,
     hints: list[dict],
-    extra_headers: Optional[dict] = None,
+    extra_headers: dict | None = None,
 ) -> list[dict]:
     """Fetch full hint content for all hints, unlocking free (cost <= 0) ones via
     POST /api/v1/unlocks then GET /api/v1/hints/{id}."""
@@ -198,7 +216,10 @@ async def fetch_hints(
             ) as resp:
                 data = await resp.json()
                 if resp.status not in (200, 400):
-                    print(f"    WARN: POST /api/v1/unlocks for hint {hint_id} returned {resp.status}", file=sys.stderr)
+                    print(
+                        f"    WARN: POST /api/v1/unlocks for hint {hint_id} returned {resp.status}",
+                        file=sys.stderr,
+                    )
 
         # GET the hint to retrieve content (and name) for both free and paid hints.
         # For free hints this returns the content now that we've unlocked it.
@@ -215,24 +236,40 @@ async def fetch_hints(
                     content = hint_data.get("content")
                     hint = {**hint, **hint_data}
 
-        result.append({"id": hint_id, "cost": cost, "content": content, "index": i,
-                        "name": hint.get("title")})
+        result.append(
+            {
+                "id": hint_id,
+                "cost": cost,
+                "content": content,
+                "index": i,
+                "name": hint.get("title"),
+            }
+        )
     return result
 
 
-async def pull_challenges(session: aiohttp.ClientSession, base_url: str, extra_headers: Optional[dict] = None):
+async def pull_challenges(
+    session: aiohttp.ClientSession, base_url: str, extra_headers: dict | None = None
+):
     """Yield full challenge dicts from the CTFd API."""
     data = await api_get(session, f"{base_url}/api/v1/challenges", extra_headers)
     if data is None:
-        print("ERROR: Could not fetch challenge list. Are you logged in?", file=sys.stderr)
+        print(
+            "ERROR: Could not fetch challenge list. Are you logged in?", file=sys.stderr
+        )
         return
 
     for stub in data["data"]:
         if stub.get("type") == "hidden":
             continue
-        detail = await api_get(session, f"{base_url}/api/v1/challenges/{stub['id']}", extra_headers)
+        detail = await api_get(
+            session, f"{base_url}/api/v1/challenges/{stub['id']}", extra_headers
+        )
         if detail is None:
-            print(f"  WARN: Could not fetch details for challenge {stub['id']}", file=sys.stderr)
+            print(
+                f"  WARN: Could not fetch details for challenge {stub['id']}",
+                file=sys.stderr,
+            )
             continue
         yield detail["data"]
 
@@ -241,8 +278,12 @@ async def pull_challenges(session: aiohttp.ClientSession, base_url: str, extra_h
 # Writing to disk
 # ---------------------------------------------------------------------------
 
+
 def build_metadata(challenge: dict, hints: list[dict]) -> dict:
-    tags = [t["value"] if isinstance(t, dict) else str(t) for t in (challenge.get("tags") or [])]
+    tags = [
+        t["value"] if isinstance(t, dict) else str(t)
+        for t in (challenge.get("tags") or [])
+    ]
     description = html_to_markdown(challenge.get("description") or "")
 
     meta = {
@@ -280,7 +321,7 @@ async def save_challenge(
     base_url: str,
     challenge: dict,
     output_dir: Path,
-    extra_headers: Optional[dict] = None,
+    extra_headers: dict | None = None,
 ):
     slug = slugify(challenge.get("name", f"challenge-{challenge['id']}"))
     chdir = output_dir / slug
@@ -315,18 +356,27 @@ async def save_challenge(
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def main(url: str, output: str, username: Optional[str], password: Optional[str], token: Optional[str]):
+
+async def main(
+    url: str,
+    output: str,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    insecure: bool = False,
+):
     base_url = url.rstrip("/")
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    extra_headers: Optional[dict] = None
+    extra_headers: dict | None = None
 
-    connector = aiohttp.TCPConnector(ssl=False)
+    verify_ssl = not insecure  # TLS verification ON by default; --insecure to disable
+    connector = aiohttp.TCPConnector(ssl=verify_ssl)
     async with aiohttp.ClientSession(connector=connector) as session:
         if token:
             print(f"Verifying token against {base_url}...")
-            if not await verify_token(base_url, token):
+            if not await verify_token(base_url, token, verify_ssl=verify_ssl):
                 sys.exit(1)
             extra_headers = token_headers(token)
             print("Token verified.\n")
@@ -342,25 +392,49 @@ async def main(url: str, output: str, username: Optional[str], password: Optiona
             ccat = challenge.get("category", "?")
             cval = challenge.get("value", 0)
             print(f"  [{ccat}] {cname} ({cval} pts)")
-            await save_challenge(session, base_url, challenge, output_dir, extra_headers)
+            await save_challenge(
+                session, base_url, challenge, output_dir, extra_headers
+            )
             count += 1
 
         print(f"\nDone. Pulled {count} challenge(s) to {output_dir.resolve()}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pull challenges from a CTFd instance.")
+    parser = argparse.ArgumentParser(
+        description="Pull challenges from a CTFd instance."
+    )
     parser.add_argument("--url", required=True, help="Base URL of the CTFd instance")
-    parser.add_argument("--output", default="./challenges", help="Output directory (default: ./challenges)")
+    parser.add_argument(
+        "--output",
+        default="./challenges",
+        help="Output directory (default: ./challenges)",
+    )
 
     auth = parser.add_mutually_exclusive_group(required=True)
     auth.add_argument("--token", help="CTFd API access token")
-    auth.add_argument("--username", help="Login username or team name (use with --password)")
+    auth.add_argument(
+        "--username", help="Login username or team name (use with --password)"
+    )
 
     parser.add_argument("--password", help="Login password (required with --username)")
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification (only for a self-signed CTFd you trust)",
+    )
     args = parser.parse_args()
 
     if args.username and not args.password:
         parser.error("--password is required when using --username")
 
-    asyncio.run(main(args.url, args.output, args.username, args.password, args.token))
+    asyncio.run(
+        main(
+            args.url,
+            args.output,
+            args.username,
+            args.password,
+            args.token,
+            args.insecure,
+        )
+    )

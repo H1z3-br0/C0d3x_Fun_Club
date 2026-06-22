@@ -1,4 +1,4 @@
-"""Shared coordinator tool logic — called by both Claude SDK and Codex coordinators."""
+"""Coordinator tool logic — pure async functions used by the OpenAI-compatible coordinator."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from backend.deps import CoordinatorDeps
 from backend.prompts import ChallengeMeta
 from backend.solver_base import FLAG_FOUND
+from backend.tracing import summarize_trace
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,8 @@ async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
     if deps.memory_store:
         query = f"{meta.name} {meta.category} {meta.description}".strip()
         try:
-            meta.memory_hits = deps.memory_store.search(query, limit=5)
+            # lancedb is synchronous — keep it off the coordinator event loop.
+            meta.memory_hits = await asyncio.to_thread(deps.memory_store.search, query, 5)
         except Exception as e:
             logger.warning("Memory search failed: %s", e)
 
@@ -169,33 +171,7 @@ async def do_read_solver_trace(deps: CoordinatorDeps, challenge_name: str, model
     if not trace_path:
         return "No tracer on solver"
     path = trace_path.path if hasattr(trace_path, "path") else str(trace_path)
-    try:
-        lines = Path(path).read_text().strip().split("\n")
-        recent = lines[-last_n:]
-        summary = []
-        for line in recent:
-            try:
-                d = json.loads(line)
-                t = d.get("type", "?")
-                if t == "tool_call":
-                    args_str = str(d.get("args", ""))[:100]
-                    summary.append(f"step {d.get('step','?')} CALL {d.get('tool','?')}: {args_str}")
-                elif t == "tool_result":
-                    result_str = str(d.get("result", ""))[:100]
-                    summary.append(f"step {d.get('step','?')} RESULT {d.get('tool','?')}: {result_str}")
-                elif t in ("finish", "error", "bump", "turn_failed"):
-                    summary.append(f"** {t}: {json.dumps({k:v for k,v in d.items() if k != 'ts'})}")
-                elif t == "usage":
-                    summary.append(f"usage: in={d.get('input_tokens',0)} out={d.get('output_tokens',0)} cost=${d.get('cost_usd',0):.4f}")
-                else:
-                    summary.append(f"{t}: {str(d)[:80]}")
-            except Exception:
-                summary.append(line[:100])
-        return "\n".join(summary)
-    except FileNotFoundError:
-        return f"Trace file not found: {path}"
-    except Exception as e:
-        return f"Error reading trace: {e}"
+    return "\n".join(summarize_trace(path, last_n=last_n))
 
 
 async def do_broadcast(deps: CoordinatorDeps, challenge_name: str, message: str) -> str:
